@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="cover-title cover-description">
+  <title id="cover-title">arTerm persistent remote Windows terminal</title>
+  <desc id="cover-description">Workflow illustration: work continues after client loss on a running logged-in Windows host; return to the same shell and catch up on bounded output with possible gaps. Windows on both ends. No host reboot or logoff recovery. Not execution evidence.</desc>
+  <metadata>Derived from arterm-before-after.svg; source SHA-256 60daa6a48b3ece0a088b1659e12ab07f974e0e6b555c0e1a6b7ae4b5fd304f57. Edit the shared hero and this composer, then regenerate this SVG.</metadata>
+  <rect width="1200" height="630" fill="#ffffff" />
+  <g font-family="Segoe UI, Arial, sans-serif" fill="#172554" text-anchor="middle">
+    <text x="600" y="49" font-size="38" font-weight="700">arTerm — Persistent remote Windows terminal</text>
+    <text x="600" y="81" font-size="24">Workflow illustration</text>
+    <text x="600" y="609" font-size="28">Windows on both ends · No host reboot/logoff recovery</text>
+  </g>
+  <g transform="translate(0 94)">
+    <defs>
+      <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+        <path d="M0 0 L10 5 L0 10" fill="#087f8c" />
+      </marker>
+    </defs>
+    <g font-family="Segoe UI, Arial, sans-serif" fill="#172554" text-anchor="middle">
+      <g id="work-continues">
+        <rect x="12" y="12" width="376" height="456" rx="20" fill="#f1f8fa" />
+        <text x="200" y="66" font-size="32" font-weight="700">Work keeps running</text>
+        <rect x="45" y="189" width="112" height="80" rx="8" fill="#ffffff" stroke="#172554" stroke-width="6" />
+        <path d="M34 283 H168 L157 269 H45 Z" fill="#172554" />
+        <path d="M168 227 H236" stroke="#087f8c" stroke-width="5" stroke-dasharray="9 9" />
+        <path d="M190 208 L218 246 M218 208 L190 246" stroke="#c73554" stroke-width="8" />
+        <rect x="254" y="158" width="91" height="152" rx="12" fill="#172554" />
+        <path d="M272 181 H327 M272 196 H327" stroke="#ffffff" stroke-width="6" />
+        <circle cx="299" cy="237" r="19" fill="#087f8c" />
+        <path d="M289 237 L296 244 L311 228" fill="none" stroke="#ffffff" stroke-width="5" />
+        <rect x="271" y="278" width="56" height="8" rx="4" fill="#4dd3c5" />
+        <text x="200" y="373" font-size="28">Client disconnects</text>
+        <text x="200" y="417" font-size="27">Host running + logged in</text>
+      </g>
+      <g id="same-shell">
+        <rect x="412" y="12" width="376" height="456" rx="20" fill="#f1f8fa" />
+        <text x="600" y="66" font-size="30" font-weight="700">Return to the same shell</text>
+        <rect x="458" y="164" width="284" height="157" rx="14" fill="#172554" />
+        <path d="M482 197 L497 210 L482 223 M505 225 H528" fill="none" stroke="#ffffff" stroke-width="6" />
+        <rect x="555" y="228" width="58" height="42" rx="8" fill="#4dd3c5" />
+        <path d="M635 234 H663 L670 242 H706 V275 H635 Z" fill="#ffffff" />
+        <path d="M676 143 C728 101 764 122 759 184" fill="none" stroke="#087f8c" stroke-width="7" marker-end="url(#arrow)" />
+        <text x="600" y="395" font-size="28">Variables + directory stay</text>
+      </g>
+      <g id="retained-output">
+        <rect x="812" y="12" width="376" height="456" rx="20" fill="#f1f8fa" />
+        <text x="1000" y="66" font-size="32" font-weight="700">Catch up on output</text>
+        <rect x="883" y="143" width="230" height="188" rx="14" fill="#ffffff" stroke="#172554" stroke-width="6" />
+        <path d="M910 174 H1084 M910 191 H1050" stroke="#8798b1" stroke-width="7" />
+        <path d="M899 219 H1097" stroke="#8798b1" stroke-width="5" stroke-dasharray="7 10" />
+        <path d="M910 249 H1084 M910 272 H1035 M910 295 H1069" stroke="#087f8c" stroke-width="8" />
+        <path d="M857 171 C826 184 827 281 866 295" fill="none" stroke="#087f8c" stroke-width="6" marker-end="url(#arrow)" />
+        <text x="1000" y="395" font-size="25">Bounded replay; gaps possible</text>
+      </g>
+    </g>
+  </g>
+</svg>

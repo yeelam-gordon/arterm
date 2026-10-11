@@ -2,47 +2,43 @@
 
 <a id="languages"></a>
 <details>
-<summary>Languages / 语言 / 言語 / اللغات (16)</summary>
+<summary>Languages (16)</summary>
 
 [English](../../README.md) | [简体中文](README.zh-CN.md) | [繁體中文](README.zh-TW.md) | [日本語](README.ja.md) | [한국어](README.ko.md) | [Español](README.es.md) | [Português (Brasil)](README.pt-BR.md) | [Français](README.fr.md) | [Deutsch](README.de.md) | [Italiano](README.it.md) | [Русский](README.ru.md) | [Türkçe](README.tr.md) | [Tiếng Việt](README.vi.md) | [Bahasa Indonesia](README.id.md) | [हिन्दी](README.hi.md) | [العربية](README.ar.md)
 
 </details>
 
-客户端或 VPN 断线后，构建和编程代理继续运行；重连同一个交互式 shell、变量与工作目录；补看保留的输出——回放有上限，不是完整日志。两端须为 Windows，主机持续运行且用户保持登录；不能跨主机重启或注销恢复。
+客户端或 VPN 断线后，让远程 Windows 上的构建和编程代理继续运行，再回到同一个 shell。
 
-[设置](#native-setup) · [核验下载与信任](../../DEVELOPMENT-INSTALL.md) · [验证同一 shell](../../README.md#prove-that-you-returned-to-the-same-shell) · [技术参考（英文）](../../README.md#get-connected)
+[设置](#native-setup) · [验证同一 shell](#native-proof) · [核验下载与信任 (英文)](../../DEVELOPMENT-INSTALL.md)
 
-<img src="../../.github/arterm-before-after.png" width="700" alt="前后对比：客户端关闭、VPN 断开或笔记本重启后，重新连接同一个远程 shell，保留变量和工作；主机须保持运行且已登录。">
+<img src="../../.github/arterm-before-after.png" width="700" alt="三项作用：断线后主机工作继续；回到相同 shell、变量与目录；补看保留输出。回放有上限，可能缺失；主机须运行且已登录。">
 
-*这是流程示意图，不是实际会话截图，也不是测试证明。图片标签为英文；要点是客户端断线后可回到同一主机上的 shell、变量和工作，前提是主机持续运行且用户已登录。它不能让工作跨越主机重启。*
+*流程示意图；英文标签，不是实际截图或测试证明。*
 
 - **断线，工作继续。** 构建、编程代理和长时间命令留在远程 Windows 主机运行，不因客户端关闭、VPN 断开或笔记本重启而停止。
 - **回到原来的工作，不是空白 shell。** 重连同一个交互式 shell 进程，保留变量和工作目录。
 - **补看离开期间的输出。** 重连会回放保留的终端输出；保留量有上限，可能存在缺口，不是完整日志。
 
-普通的非交互式任务，用现有且获准的远程命令通道可能已足够。需要在客户端关闭、VPN 断开或笔记本重启后，重新连接到**同一个由主机运行的交互式 Windows shell 及其环境**时，再选择 arTerm，并遵循其连接要求和本地控制限制。两端都须为 Windows，主机须持续运行且用户保持登录；这不是主机重启恢复。
-
-<a id="native-setup"></a>
-
 ## 要求与信任
 
-适用条件：两端 Windows、隧道使用同一 GitHub 账户、允许出站联网；主机须保持运行且已登录。主机重启、注销、崩溃、关机或 shell exit 后不会恢复进程。当前下载为开发签名版本，不是公共受信任的生产版本。
+arTerm 是原生 Rust Windows 程序。两端须为 Windows，隧道用同一个 GitHub 账户，并允许出站联网。主机须持续运行且用户保持登录；重启、注销、崩溃、关机或远程 shell 的 exit 会结束进程，不会恢复。普通非交互式任务可能已有足够的获准远程命令通道。
 
-[先核验下载并审阅信任决定](../../DEVELOPMENT-INSTALL.md). 不要绕过系统警告或组织政策。
+当前 x64/ARM64 下载是开发签名版本，其代码签名证书并非 Windows 默认信任的证书，不是正式生产版本。安装或添加信任前，在 PowerShell 中只读核验：
 
-客户端和主机都需要 Windows；主机必须保持运行且用户已登录。客户端需要 Microsoft devtunnel CLI，主机需要兼容的原生 VS Code tunnel CLI（如 code-tunnel.exe），完整编辑器不是必需的。两端隧道必须使用同一个 GitHub 账户登录；gh 登录不能代替。需要允许出站联网；依赖下载需同意，主机配置需接受 VS Code server 许可。
+1. 把 `$archive` 设为实际下载的 ZIP 路径；运行 `Get-FileHash -LiteralPath $archive -Algorithm SHA256`，比较 `.Hash` 与该发布页公开 `SHA256SUMS` 中同名 ZIP 的值，不是解压包内的清单。缺失或不匹配时停止；匹配不代表安全。
+2. ZIP 匹配后解压，在解压后的目录中打开 PowerShell，用 `Get-FileHash -LiteralPath .\arTerm-Dev.cer -Algorithm SHA256` 计算公开证书的 `.Hash`，用 `$certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new((Resolve-Path -LiteralPath .\arTerm-Dev.cer).Path)` 保存证书对象，不显示字段；随后运行 `$certificate.Subject; $certificate.Thumbprint` 打印名称和指纹，与 [固定值和完整检查（英文）](../../DEVELOPMENT-INSTALL.md#certificate-identity) 比较，不能只看名称，不导入信任。
+3. 把 `$file` 逐一设为 `arTerm-Client-Setup.exe`、`arTerm-Host-Setup.exe`、`arterm.exe`、`arterm-host.exe` 的路径，运行 `Get-AuthenticodeSignature -LiteralPath $file`，查看 `.Status` 和 `.SignerCertificate`。四个文件均须为 `Valid`，签名证书的指纹与字节均匹配固定 CER；先完成 [只读身份/签名检查（英文）](../../DEVELOPMENT-INSTALL.md#inspect-extracted-executable-signatures-without-running-them)，再运行任何 EXE。
 
-从[Windows 下载页](https://github.com/yeelam/arterm/releases/latest)选择 x64 或 ARM64。已核实该链接转到 v0.7.1。包是开发证书签名版本，不是公共受信任的生产签名。先按[安装指南](../../DEVELOPMENT-INSTALL.md)核验校验和与公开证书指纹；仅在明确同意且组织政策允许时添加当前用户信任。不要绕过 Authenticode、SmartScreen 或应用控制。
-
-**信任或安装前：**按[下载 ZIP 校验步骤](../../DEVELOPMENT-INSTALL.md#verify-the-downloaded-release-payload-before-trust-or-installation)用 Get-FileHash 与公开发布的归档校验和比较。CER 指纹不能验证 ZIP 或程序。公开校验和缺失或不匹配时停止；匹配不等于安全或信任批准。
-
-主机设置还需政策允许的 Windows Script Host/VBScript；在安装或信任前确认，受阻时停止，不绕过政策。
-
-## 设置
+手动证书信任须另行明确批准且符合政策，批准后重做检查；非 `Valid`、未知签名者或不匹配必须停止，不能绕过系统警告或组织控制。主机还需政策允许的 Windows Script Host/VBScript。
 
 **保护会话隐私：**保留的终端输出、正常 shell 历史和恢复文件可能包含命令、路径、代码或秘密。两端都应妥善保护，分享日志、截图或支持材料前先脱敏。凭据由 DPAPI 保护，不表示所有文件都加密或不含内容；就绪诊断的有限内容排除不适用于全部会话数据。
 
-运行前按[只读签名检查](../../DEVELOPMENT-INSTALL.md#inspect-extracted-executable-signatures-without-running-them)用 Get-AuthenticodeSignature 检查解压后的安装器和客户端。ZIP 校验和、CER 身份与可执行文件的 Windows 信任是不同检查；须匹配固定的开发签名者且状态为 Valid。未知签名者或非 Valid 状态必须停止，不能绕过警告。是否信任仍需单独明确批准并符合政策；批准后重新检查。控制仅限同一本地用户、登录会话、完整性/提权上下文和相同签名客户端，不是任意跨机器代理共享。
+<a id="native-setup"></a>
+
+## 设置
+
+[技术参考（英文）](../../QUICKSTART.md)
 
 远程运行 arTerm-Host-Setup.exe，打开新的 PowerShell：
 
@@ -55,6 +51,8 @@ arterm-host setup --name my-devbox
 ```powershell
 arterm connect my-devbox MyProof --shell powershell
 ```
+
+<a id="native-proof"></a>
 
 ## 验证同一 shell
 
@@ -82,20 +80,13 @@ $PID; $artermProof; (Get-Location).Path
 
 预期：相同 PID、kept-on-host、相同目录和 True。下次用同一连接命令继续工作。测试结束在远程 shell 输入 exit，会结束进程，不能恢复运行状态。
 
-## 限制
-
-主机重启、注销、崩溃、关闭或 shell 退出后不会复活进程；启动依赖用户登录，不配置自动登录或无用户登录服务。回放输出有保留上限。整个开发分支并未获得发布资格：文件传输独立归档审查和直接输入门槛仍未完成，任意 TUI 未获认证。文件自动解除阻止不代表安全。
-
-回放有限；完整输出请保留远程构建日志。普通 arterm-host stop 可能自动重启；持续停止用 arterm-host stop --disable。
-
 ## 故障恢复与撤销
 
 失败先运行 arterm doctor my-devbox，检查两端账户和网络；需要时用 arterm --login 显式恢复客户端登录。不要删除恢复记录或重装运行中的主机。更新默认拒绝中断活动会话。主机上 arterm-host stop --disable 可持续停止，arterm-host start 可重新启动，但不会恢复丢失的 shell。卸载保留用户数据；撤销证书信任见安装指南。
 
-## 高级本地控制
+<a id="限制"></a>
+<a id="高级本地控制"></a>
 
-托管 send/read 需新建受支持的 PowerShell/pwsh 会话及匹配的受信任本地连接身份；旧会话不补装集成。发布包并不关闭当前分支的直接输入/传输归档审查门槛，未知版本仍未知。
+托管 send/read 需新建受支持的 PowerShell/pwsh 会话及匹配的受信任本地连接身份；旧会话不补装集成。 当前开发分支的直接输入验证和传输归档独立审查尚未完成；发布包不代表当前分支的全部功能都已通过验证，未知版本仍未验证。任意 TUI、混合架构和 Windows Sandbox 未获认证。文件自动解除阻止不代表安全。详情见英文指南。
 
-这些公共命令可供 Copilot CLI、Claude Code、Codex、Gemini CLI、Kimi、Qwen CLI 用户在工具允许时使用，不是六客户端原生集成认证。第二个本地控制终端必须与连接进程具有相同用户、登录会话、完整性/提权上下文，使用字节完全相同的受信任签名客户端；连接进程须保持运行。
-
-[README](../../README.md) · [Quick start](../../QUICKSTART.md) · [Automation](../../QUICKSTART.md#automation) · [故障排查](../../README.md#installation-and-troubleshooting-details) · [升级与停止](../../QUICKSTART.md#upgrade-without-registering-again) · [撤销证书信任](../../DEVELOPMENT-INSTALL.md) · [Release evidence / gates](../../README.md#released-downloads-versus-development-gates) · [Signing](../../SIGNING.md)
+[技术参考（英文）](../../QUICKSTART.md#automation) · [核验下载与信任 (英文)](../../DEVELOPMENT-INSTALL.md) · [Signing](../../SIGNING.md) · [English README](../../README.md)

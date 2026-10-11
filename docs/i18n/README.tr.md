@@ -2,43 +2,43 @@
 
 <a id="languages"></a>
 <details>
-<summary>Languages / 语言 / 言語 / اللغات (16)</summary>
+<summary>Languages (16)</summary>
 
 [English](../../README.md) | [简体中文](README.zh-CN.md) | [繁體中文](README.zh-TW.md) | [日本語](README.ja.md) | [한국어](README.ko.md) | [Español](README.es.md) | [Português (Brasil)](README.pt-BR.md) | [Français](README.fr.md) | [Deutsch](README.de.md) | [Italiano](README.it.md) | [Русский](README.ru.md) | [Türkçe](README.tr.md) | [Tiếng Việt](README.vi.md) | [Bahasa Indonesia](README.id.md) | [हिन्दी](README.hi.md) | [العربية](README.ar.md)
 
 </details>
 
-İstemci/VPN bağlantısı kesilse de derlemeler ve kodlama ajanları çalışır; aynı etkileşimli kabuğa, değişkenlere ve çalışma dizinine dönün; saklanan çıktıyı okuyun: sınırlı yeniden oynatma, tam günlük değil. İki taraf da Windows; uzak bilgisayar çalışır ve kullanıcı oturumu açık kalır. Uzak bilgisayar yeniden başlatılırsa veya kullanıcı oturumu kapatılırsa kurtarma yoktur.
+İstemci veya VPN bağlantısı kesilse de derlemeler ve ajanlar uzak Windows’ta çalışır. Aynı kabuğa dönün.
 
-[Kur](#native-setup) · [İndirmeyi ve güveni doğrula](../../DEVELOPMENT-INSTALL.md) · [Aynı kabuğu doğrula](../../README.md#prove-that-you-returned-to-the-same-shell) · [Teknik başvuru (İngilizce)](../../README.md#get-connected)
+[Kur](#native-setup) · [Aynı kabuğu doğrula](#native-proof) · [İndirmeyi ve güveni doğrula (İngilizce)](../../DEVELOPMENT-INSTALL.md)
 
-<img src="../../.github/arterm-before-after.png" width="700" alt="Önce ve sonra: istemciyi kapattıktan, VPN kesildikten veya dizüstünü yeniden başlattıktan sonra aynı uzak kabuğa, değişkenlere ve çalışmaya dönün; uzak bilgisayar çalışır ve kullanıcı oturumu açık kalır.">
+<img src="../../.github/arterm-before-after.png" width="700" alt="Üç eylem: istemci ayrılsa da iş sürer; aynı kabuk, değişkenler ve dizine dönün; saklanan çıktıyı okuyun. Yeniden oynatma sınırlıdır, boşluklar olabilir. Uzak bilgisayar çalışır ve oturum açık kalır.">
 
-*Bu bir iş akışı çizimidir; gerçek oturum ekran görüntüsü veya test kanıtı değildir. Görseldeki etiketler İngilizcedir. Anlatılan fayda, istemci bağlantısı kesildikten sonra aynı kabuğa, değişkenlere ve çalışmaya dönmektir; uzak bilgisayar çalışmalı ve kullanıcı oturumu açık kalmalıdır. Uzak bilgisayar yeniden başlatılırsa süreçler korunmaz.*
+*İngilizce etiketli iş akışı çizimi; gerçek ekran görüntüsü veya test kanıtı değil.*
 
 - **İstemci olmadan da iş sürer.** Derlemeler, ajanlar ve uzun komutlar istemci kapanması, VPN kesintisi veya dizüstü yeniden başlatması sırasında uzak Windows bilgisayarında çalışmayı sürdürür.
 - **Boş bir kabuğa değil, işinize dönün.** Aynı etkileşimli kabuk sürecine, değişkenleri ve çalışma dizini korunarak yeniden bağlanın.
 - **Siz yokken olanları okuyun.** Yeniden bağlantıda saklanan terminal çıktısı oynatılır; saklama sınırlıdır, boşluklar olabilir ve bu tam bir günlük değildir.
 
-Sıradan etkileşimsiz işler için mevcut, onaylanmış uzak komut kanalınız yeterli olabilir. İstemci kapanması, VPN kesintisi veya dizüstü bilgisayarın yeniden başlatılmasından sonra **sunucuda çalışan aynı etkileşimli Windows kabuğuna ve ortamına** yeniden bağlanmanız gerektiğinde, belgelenen bağlantı koşullarına ve yerel denetim sınırlarına uyarak arTerm seçin. İki uç da Windows olmalı, sunucu çalışır ve kullanıcı oturum açmış durumda kalmalıdır; sunucunun yeniden başlatılmasından sonra kurtarma sağlamaz.
+## Gereksinimler ve güven
+
+arTerm, Rust ile yazılmış yerel Windows yazılımıdır. İki uçta Windows, tünellerde aynı GitHub hesabı ve izin verilen giden bağlantılar gerekir. Uzak bilgisayar çalışmalı ve kullanıcı oturumu açık kalmalıdır. Yeniden başlatma, kullanıcı çıkışı, çökme, kapanma veya uzak kabukta exit süreci bitirir; geri getirmez. Sıradan etkileşimsiz işler için onaylı uzak komut kanalınız yeterli olabilir.
+
+x64/ARM64 derlemeleri, Windows’un varsayılan olarak güvenmediği bir geliştirme sertifikasıyla imzalanmıştır; bunlar üretim sürümleri değildir. Kurulum veya güven eklemeden önce PowerShell’de salt okunur denetleyin:
+
+1. `$archive` değişkenini indirilen ZIP’in yoluna ayarlayın. `Get-FileHash -LiteralPath $archive -Algorithm SHA256` çıktısındaki `.Hash` değerini o sürümün kamuya açık `SHA256SUMS` dosyasındaki aynı adlı ZIP ile karşılaştırın, çıkarılan listeyle değil. Değer yoksa veya farklıysa durun; eşleşme güvenlik kanıtı değildir.
+2. ZIP eşleşince arşivi çıkarın ve çıkarılan dosyaların dizininde PowerShell’i açın. `Get-FileHash -LiteralPath .\arTerm-Dev.cer -Algorithm SHA256` sertifika hash’ini hesaplar; `$certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new((Resolve-Path -LiteralPath .\arTerm-Dev.cer).Path)` sertifika nesnesini kaydeder, alanları göstermez; adı ve parmak izini görüntülemek için ardından `$certificate.Subject; $certificate.Thumbprint` çalıştırın. [Sabitlenen değerler/denetim (İngilizce)](../../DEVELOPMENT-INSTALL.md#certificate-identity) ile karşılaştırın; yalnız ada bakmayın; bu aşamada sertifikayı güvenilen sertifika deposuna aktarmayın.
+3. `$file` değişkenini sırayla `arTerm-Client-Setup.exe`, `arTerm-Host-Setup.exe`, `arterm.exe`, `arterm-host.exe` yollarına ayarlayın. `Get-AuthenticodeSignature -LiteralPath $file` `.Status` ve `.SignerCertificate` gösterir. Dördü de `Valid` olmalı; sertifika parmak izi ve baytları sabitlenen CER ile eşleşmelidir. Herhangi bir EXE çalıştırmadan [tam kimlik/imza denetimini (İngilizce)](../../DEVELOPMENT-INSTALL.md#inspect-extracted-executable-signatures-without-running-them) bitirin.
+
+Elle güven ayrı açık onay ve politika izni gerektirir; sonra yeniden denetleyin. `Valid` değilse, imzalayan bilinmiyorsa veya farklıysa durun; uyarıları/denetimleri aşmayın. Uzak bilgisayar izinli Windows Script Host/VBScript gerektirir.
+
+Saklanan çıktı, normal kabuk geçmişi ve kurtarma dosyalarında komutlar, yollar, kod veya sırlar olabilir. İki bilgisayarda koruyun; günlükleri, görüntüleri ve destek dosyalarını paylaşmadan önce hassas bilgileri gizleyin. Kimlik bilgilerinin DPAPI koruması tüm dosyaların şifreli veya içeriksiz olduğu anlamına gelmez. Hazır olma tanılarının içerik dışlamaları daha dar kapsamlıdır.
 
 <a id="native-setup"></a>
 
-## Gereksinimler ve güven
-
-İki tarafta Windows, tünellerde aynı GitHub hesabı ve izin verilen giden bağlantılar gerekir. Uzak bilgisayar çalışmalı, kullanıcı oturumu açık kalmalıdır. Uzak bilgisayarın yeniden başlaması, kullanıcı çıkışı, çökmesi, kapanması veya kabukta exit sonrası süreçler kurtarılmaz. Güncel indirmeler geliştirme imzalıdır; genel olarak güvenilen bir imzaya sahip üretim derlemeleri değildir.
-
-[Kurulumdan önce indirmeyi doğrulayın ve güven kararını değerlendirin](../../DEVELOPMENT-INSTALL.md). OS uyarılarını veya kuruluş politikasını atlatmayın.
-
-Hem istemci bilgisayarı hem de uzak ana makine Windows kullanmalıdır. Uzak bilgisayar çalışır durumda ve kullanıcı oturumu açık kalmalıdır. İstemci Microsoft devtunnel CLI; uzak bilgisayar ise code-tunnel.exe gibi uyumlu bir VS Code tunnel CLI yürütülebilir dosyası kullanır. Tam düzenleyici isteğe bağlıdır. İki tünelde aynı GitHub hesabıyla oturum açın; gh kimlik doğrulaması ayrı bir işlemdir. Giden bağlantılara izin, bağımlılık indirmelerine onay ve VS Code server lisansının kabulü gerekir.
-
-[Windows indirmelerinden](https://github.com/yeelam/arterm/releases/latest) x64 veya ARM64 seçin. Yayımlanan v0.7.1, genel olarak güvenilen bir üretim sertifikasıyla değil, bir geliştirme sertifikasıyla imzalanmıştır. Önce Get-FileHash ile [ZIP sağlama toplamını](../../DEVELOPMENT-INSTALL.md#verify-the-downloaded-release-payload-before-trust-or-installation) aynı sürümün yayımlanmış listesiyle karşılaştırın. ZIP özeti, CER kimliği ve yürütülebilir dosyanın Windows güveni ayrı denetimlerdir. Çalıştırmadan önce çıkarılmış kurucuları ve istemcileri Get-AuthenticodeSignature ile [salt okunur imza denetiminden](../../DEVELOPMENT-INSTALL.md#inspect-extracted-executable-signatures-without-running-them) geçirin. İmzalayanın kimliği, kılavuzda belirtilen geliştirme sertifikasının kimliğiyle eşleşmeli ve imza durumu `Valid` olmalıdır. Eksik veya farklı sağlama toplamı, bilinmeyen imzalayan ya da Valid olmayan durumda durun. Sertifikaya güven için ayrıca açık kullanıcı onayı ve kuruluş politikası izni gerekir; ardından yeniden denetleyin. İşletim sistemi uyarılarını, Authenticode, SmartScreen veya uygulama denetimlerini atlatmayın.
-
-Sunucu ayrıca politikanın izin verdiği Windows Script Host/VBScript gerektirir. Güven/kurulum öncesi kontrol edin; engelliyse durun, politikayı atlatmayın.
-
 ## Kurulum
 
-Saklanan çıktı, normal kabuk geçmişi ve kurtarma dosyalarında komutlar, yollar, kod veya sırlar olabilir. İki bilgisayarda koruyun; günlükleri, görüntüleri ve destek dosyalarını paylaşmadan önce hassas bilgileri gizleyin. Kimlik bilgilerinin DPAPI koruması tüm dosyaların şifreli veya içeriksiz olduğu anlamına gelmez. Hazır olma tanılarının içerik dışlamaları daha dar kapsamlıdır.
+[Teknik başvuru (İngilizce)](../../QUICKSTART.md)
 
 Denetimler başarılı ve politika izin veriyorsa uzak bilgisayarda arTerm-Host-Setup.exe çalıştırıp yeni PowerShell açın:
 
@@ -51,6 +51,8 @@ Tünel girişini tamamlayıp sunucunun yazdırdığı kayıt komutunu saklayın.
 ```powershell
 arterm connect my-devbox MyProof --shell powershell
 ```
+
+<a id="native-proof"></a>
 
 ## Aynı kabuğu doğrulama
 
@@ -78,20 +80,13 @@ $PID; $artermProof; (Get-Location).Path
 
 Aynı PID, kept-on-host, aynı dizin ve True beklenir. Daha sonra da aynı bağlantı komutuyla devam edin. Denemeyi bitirmek için uzak kabukta exit yazın: süreç biter ve çalışma durumu geri getirilemez.
 
-## Sınırlar
-
-Uzak bilgisayar yeniden başlatılır, kullanıcı çıkış yapar, sistem çöker veya kapanır ya da kabuktan çıkılırsa süreçler geri getirilmez. Sunucu kullanıcı girişinde başlar; otomatik giriş veya oturum açılmamış hizmet kurmaz. Çıktı tekrarının saklama sınırı vardır. Geliştirme dalının tamamı yayıma uygun olarak doğrulanmamıştır: dosya aktarım arşivlerinin bağımsız incelemesi ve doğrudan giriş koşulları tamamlanmamıştır. Rastgele TUI davranışları için sertifikasyon yapılmamıştır; dosya engelinin otomatik kaldırılması güvenlik garantisi değildir.
-
-Çıktı tekrarı sınırlıdır; tüm çıktı için uzak derleme günlüğünü saklayın. arterm-host stop otomatik başlayabilir; arterm-host stop --disable durdurulmuş durumda kalmasını sağlar.
-
 ## Kurtarma ve geri alma
 
 Hatada arterm doctor my-devbox ile hesapları ve ağı kontrol edin; gerekiyorsa arterm --login ile istemci girişini düzeltin. Kurtarma kayıtlarını silmeyin veya çalışan sunucuyu yeniden kurmayın. Güncellemeler varsayılan olarak etkin oturumları kesmez. Sunucuda arterm-host stop --disable durdurulmuş durumda kalmasını sağlar; arterm-host start yeniden başlatır ama kayıp kabukları geri getirmez. Kaldırma kullanıcı verilerini korur. Sertifika güvenini kaldırmak için kılavuza bakın.
 
-## Gelişmiş yerel kontrol
+<a id="sınırlar"></a>
+<a id="gelişmiş-yerel-kontrol"></a>
 
-Yönetilen send/read yeni desteklenen PowerShell/pwsh oturumu ve bağlantıyla eşleşen güvenilir yerel kimlik gerektirir. Eski kabuklara entegrasyon eklenmez. Yayın, dalın doğrudan giriş/aktarım arşivi incelemesi koşullarını kapatmaz; bilinmeyen sürümler doğrulanmamıştır.
+Yönetilen send/read yeni desteklenen PowerShell/pwsh oturumu ve bağlantıyla eşleşen güvenilir yerel kimlik gerektirir. Eski kabuklara entegrasyon eklenmez. Geliştirme dalının doğrudan giriş doğrulaması ve bağımsız aktarım arşivi incelemesi henüz tamamlanmadı; yayın dalın tüm yeteneklerini onaylamaz, bilinmeyen sürümler doğrulanmamıştır. Rastgele TUI’ler, karma mimariler ve Windows Sandbox sertifikalı değildir. Dosya engelinin otomatik kaldırılması güvenlik garantisi değildir. Ayrıntılar İngilizce kılavuzdadır.
 
-Copilot CLI, Claude Code, Codex, Gemini CLI, Kimi ve Qwen CLI kullanıcıları araçları izin verirse normal Windows komutları kullanabilir; bu altı istemci için ürünlere özgü entegrasyon sertifikası değildir. Başka yerel denetleyici aynı kullanıcı, giriş oturumu, bütünlük/yükseltme bağlamı ve bayt düzeyinde aynı güvenilir imzalı istemci gerektirir. Bağlantı süreci çalışır kalsın. Farklı makinelerdeki ajanlara gelişigüzel paylaşım değildir.
-
-[English README](../../README.md) · [Quick start](../../QUICKSTART.md) · [Automation](../../QUICKSTART.md#automation) · [Sorun giderme](../../README.md#installation-and-troubleshooting-details) · [Güncelleme ve durdurma](../../QUICKSTART.md#upgrade-without-registering-again) · [Sertifika güvenini kaldırma](../../DEVELOPMENT-INSTALL.md) · [Release evidence / gates](../../README.md#released-downloads-versus-development-gates) · [Signing](../../SIGNING.md)
+[Teknik başvuru (İngilizce)](../../QUICKSTART.md#automation) · [İndirmeyi ve güveni doğrula (İngilizce)](../../DEVELOPMENT-INSTALL.md) · [Signing](../../SIGNING.md) · [English README](../../README.md)

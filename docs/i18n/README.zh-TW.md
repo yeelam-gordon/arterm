@@ -2,43 +2,43 @@
 
 <a id="languages"></a>
 <details>
-<summary>Languages / 语言 / 言語 / اللغات (16)</summary>
+<summary>Languages (16)</summary>
 
 [English](../../README.md) | [简体中文](README.zh-CN.md) | [繁體中文](README.zh-TW.md) | [日本語](README.ja.md) | [한국어](README.ko.md) | [Español](README.es.md) | [Português (Brasil)](README.pt-BR.md) | [Français](README.fr.md) | [Deutsch](README.de.md) | [Italiano](README.it.md) | [Русский](README.ru.md) | [Türkçe](README.tr.md) | [Tiếng Việt](README.vi.md) | [Bahasa Indonesia](README.id.md) | [हिन्दी](README.hi.md) | [العربية](README.ar.md)
 
 </details>
 
-用戶端或 VPN 斷線後，建置和程式設計代理繼續執行；重新連線到同一互動式 shell、變數與工作目錄；補看保留的輸出——回放有上限，不是完整日誌。兩端須為 Windows，主機持續運作且使用者保持登入；不能跨主機重新啟動或登出復原。
+用戶端或 VPN 斷線後，讓遠端 Windows 的建置與程式設計代理繼續執行，再回到同一個 shell。
 
-[設定](#native-setup) · [驗證下載與信任](../../DEVELOPMENT-INSTALL.md) · [驗證同一 shell](../../README.md#prove-that-you-returned-to-the-same-shell) · [技術參考（英文）](../../README.md#get-connected)
+[設定](#native-setup) · [驗證同一 shell](#native-proof) · [驗證下載與信任 (英文)](../../DEVELOPMENT-INSTALL.md)
 
-<img src="../../.github/arterm-before-after.png" width="700" alt="前後對照：用戶端關閉、VPN 斷線或筆電重新啟動後，回到同一遠端 shell、變數與工作；主機須持續運作且已登入。">
+<img src="../../.github/arterm-before-after.png" width="700" alt="三項作用：斷線後主機工作繼續；回到相同 shell、變數與目錄；補看保留輸出。回放有上限，可能缺漏；主機須運作且已登入。">
 
-*這是流程示意圖，不是實際工作階段截圖或測試證明。圖中標籤為英文；重點是用戶端斷線後仍能回到同一主機上的 shell、變數與工作，前提是主機持續運作且使用者已登入。主機重新啟動後無法保留執行中的工作。*
+*工作流程示意圖；英文標籤，不是實際畫面或測試證明。*
 
 - **斷線，工作繼續。** 建置、程式設計代理和長時間指令留在遠端 Windows 主機執行，不因用戶端關閉、VPN 斷線或筆電重新啟動而停止。
 - **回到原本的工作，不是空白 shell。** 重新連線到同一互動式 shell 程序，保留變數與工作目錄。
 - **補看離開期間的輸出。** 重新連線會回放保留的終端輸出；保留量有上限，可能有缺漏，不是完整日誌。
 
-一般非互動式工作，現有且獲准的遠端命令管道可能已足夠。需要在用戶端關閉、VPN 中斷或筆電重新啟動後，重新連線到**同一個由主機執行的互動式 Windows shell 及其環境**時，再選擇 arTerm，並遵循其連線要求與本機控制限制。兩端都須為 Windows，主機須持續執行且使用者保持登入；這不是主機重新啟動後的復原。
+## 需求與信任
+
+arTerm 是原生 Rust Windows 程式。兩端須為 Windows，通道使用同一 GitHub 帳號，並允許對外連線。主機須持續運作且使用者保持登入；重新啟動、登出、當機、關機或遠端 shell 的 exit 會結束程序，不會復原。一般非互動式工作可能已有足夠的獲准遠端命令管道。
+
+目前 x64/ARM64 下載採開發簽署，其程式碼簽章憑證並非 Windows 預設信任的憑證，不是正式生產版本。安裝或加入信任前，在 PowerShell 唯讀檢查：
+
+1. 將 `$archive` 設為實際下載的 ZIP 路徑；執行 `Get-FileHash -LiteralPath $archive -Algorithm SHA256`，比較 `.Hash` 與該發布頁公開 `SHA256SUMS` 中同名 ZIP 的值，不是解壓縮套件內的清單。缺少或不符就停止；相符不代表安全。
+2. ZIP 相符後解壓縮，在解壓縮後的目錄中開啟 PowerShell，用 `Get-FileHash -LiteralPath .\arTerm-Dev.cer -Algorithm SHA256` 計算公開憑證的 `.Hash`，用 `$certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new((Resolve-Path -LiteralPath .\arTerm-Dev.cer).Path)` 儲存憑證物件，不顯示欄位；接著執行 `$certificate.Subject; $certificate.Thumbprint` 顯示名稱與指紋，對照 [固定值與完整檢查（英文）](../../DEVELOPMENT-INSTALL.md#certificate-identity)，不能只看名稱，不匯入信任。
+3. 將 `$file` 依序設為 `arTerm-Client-Setup.exe`、`arTerm-Host-Setup.exe`、`arterm.exe`、`arterm-host.exe` 的路徑，執行 `Get-AuthenticodeSignature -LiteralPath $file`，查看 `.Status` 與 `.SignerCertificate`。四個檔案皆須為 `Valid`，簽署憑證的指紋與位元組皆符合固定 CER；先完成 [唯讀身分與簽章檢查（英文）](../../DEVELOPMENT-INSTALL.md#inspect-extracted-executable-signatures-without-running-them)，再執行任何 EXE。
+
+手動憑證信任須另行明確核准且符合政策，核准後重做檢查；非 `Valid`、未知簽署者或不符皆須停止，不繞過系統警告或組織控制。主機還需政策允許的 Windows Script Host/VBScript。
+
+請保護兩端保留的終端機輸出、一般 shell 歷程與復原檔案，可能含指令、路徑、程式碼或機密。分享記錄、截圖或支援資料前先遮蔽敏感內容。DPAPI 保護認證資訊，不表示所有檔案皆加密或不含內容；就緒診斷的內容排除範圍較窄。
 
 <a id="native-setup"></a>
 
-## 需求與信任
-
-適用條件：兩端 Windows、通道使用同一 GitHub 帳號、允許對外連線；主機須持續運作且已登入。主機重新啟動、登出、當機、關機或 shell exit 後不會復原程序。目前下載採開發憑證簽署，不是公眾信任的正式版本。
-
-[先驗證下載並審閱信任決定](../../DEVELOPMENT-INSTALL.md). 不可略過系統警告或組織政策。
-
-用戶端與主機都必須使用 Windows；主機須保持運作且使用者已登入。用戶端需要 Microsoft devtunnel CLI，主機需要相容的原生 VS Code tunnel CLI（例如 code-tunnel.exe），不一定要安裝完整編輯器。兩端通道須登入同一個 GitHub 帳號；gh 登入不能取代通道驗證。必須允許對外連線；下載相依元件需經同意，主機設定需接受 VS Code server 授權條款。
-
-從 [Windows 下載頁](https://github.com/yeelam/arterm/releases/latest)選擇 x64 或 ARM64。已發布的 v0.7.1 套件採開發憑證簽署，不是公眾信任的正式憑證。先按[公開 ZIP 檢查碼比對](../../DEVELOPMENT-INSTALL.md#verify-the-downloaded-release-payload-before-trust-or-installation)以 Get-FileHash 比對該版本發布的清單。ZIP 檢查碼、CER 憑證身分與執行檔簽章是不同檢查；CER 雜湊不能驗證程式。執行前依[唯讀簽章檢查](../../DEVELOPMENT-INSTALL.md#inspect-extracted-executable-signatures-without-running-them)用 Get-AuthenticodeSignature 檢查解壓縮後的安裝程式與用戶端，須符合固定的開發簽署者且狀態為 Valid。檢查碼缺失或不符、未知簽署者、非 Valid 狀態都必須停止。信任憑證須另經使用者明確核准且符合組織政策，核准後再檢查；不可略過系統警告、Authenticode、SmartScreen 或應用程式管制。
-
-主機設定還需政策允許的 Windows Script Host/VBScript；安裝或信任前確認，受阻時停止，不略過政策。
-
 ## 設定
 
-請保護兩端保留的終端機輸出、一般 shell 歷程與復原檔案，可能含指令、路徑、程式碼或機密。分享記錄、截圖或支援資料前先遮蔽敏感內容。DPAPI 保護認證資訊，不表示所有檔案皆加密或不含內容；就緒診斷的內容排除範圍較窄。
+[技術參考（英文）](../../QUICKSTART.md)
 
 通過上述檢查且政策允許後，在遠端執行 arTerm-Host-Setup.exe，開啟新的 PowerShell：
 
@@ -51,6 +51,8 @@ arterm-host setup --name my-devbox
 ```powershell
 arterm connect my-devbox MyProof --shell powershell
 ```
+
+<a id="native-proof"></a>
 
 ## 驗證同一 shell
 
@@ -78,20 +80,13 @@ $PID; $artermProof; (Get-Location).Path
 
 預期看到相同 PID、kept-on-host、相同目錄與 True。下次使用相同指令繼續工作。測試結束時在遠端 shell 輸入 exit；這會結束程序，無法恢復執行狀態。
 
-## 限制
-
-只保留用戶端斷線期間的工作，無法在主機重新啟動、登出、當機、關機或 shell 結束後復活程序。主機在使用者登入時啟動，不設定自動登入或無人登入服務。輸出回放有保留上限。整個開發分支尚未通過發布資格：檔案傳輸 ZIP 封裝與解壓縮的獨立審查與直接輸入門檻仍未完成，任意 TUI 未獲認證；自動解除檔案封鎖也不代表安全。
-
-回放有限；完整輸出請保留遠端建置記錄。一般 arterm-host stop 可能自動重啟；持續停止用 arterm-host stop --disable。
-
 ## 復原與撤銷
 
 失敗時先執行 arterm doctor my-devbox，檢查帳號與網路，必要時用 arterm --login 恢復用戶端驗證。不要刪除復原記錄或重新安裝運作中的主機。更新預設拒絕中斷活動工作階段。主機上的 arterm-host stop --disable 可持續停止，arterm-host start 可再啟動，但不會復原已失去的 shell。解除安裝保留使用者資料；撤銷憑證信任請見安裝指南。
 
-## 進階本機控制
+<a id="限制"></a>
+<a id="進階本機控制"></a>
 
-受管理的 send/read 需新建受支援的 PowerShell/pwsh 工作階段及相符的受信任本機連線身分；舊工作階段不會補上整合。發布套件不會關閉目前分支的直接輸入／傳輸 ZIP 封裝與解壓縮審查門檻，未知版本仍未知。
+受管理的 send/read 需新建受支援的 PowerShell/pwsh 工作階段及相符的受信任本機連線身分；舊工作階段不會補上整合。 目前開發分支的直接輸入驗證及傳輸 ZIP 封裝與解壓縮獨立審查尚未完成；發布套件不代表目前分支的所有功能都已通過驗證，未知版本仍未驗證。任意 TUI、混合架構與 Windows Sandbox 未獲認證。自動解除檔案封鎖不代表安全。詳情見英文指南。
 
-Copilot CLI、Claude Code、Codex、Gemini CLI、Kimi、Qwen CLI 使用者可在工具允許時執行一般 Windows 指令，不代表六者皆有原生整合。另一個本機控制終端須與連線程序使用相同使用者、登入工作階段、完整性／提升權限狀態與位元組完全相同的受信任簽署用戶端；連線程序須持續執行。不是任意跨電腦代理共用。
-
-[English README](../../README.md) · [Quick start](../../QUICKSTART.md) · [Automation](../../QUICKSTART.md#automation) · [疑難排解](../../README.md#installation-and-troubleshooting-details) · [升級與停止](../../QUICKSTART.md#upgrade-without-registering-again) · [撤銷憑證信任](../../DEVELOPMENT-INSTALL.md) · [Release evidence / gates](../../README.md#released-downloads-versus-development-gates) · [Signing](../../SIGNING.md)
+[技術參考（英文）](../../QUICKSTART.md#automation) · [驗證下載與信任 (英文)](../../DEVELOPMENT-INSTALL.md) · [Signing](../../SIGNING.md) · [English README](../../README.md)

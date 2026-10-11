@@ -1,19 +1,77 @@
 # arTerm quick start
 
-arTerm has two roles: install the **host** on the remote machine and the
-**client** on your notebook. Use your normal signed-in Windows account.
+Install the **host** on the remote Windows machine and the **client** locally.
+This is the canonical ordered setup and same-shell verification route.
 
-For development-signed downloads, first follow
-[DEVELOPMENT-INSTALL.md](DEVELOPMENT-INSTALL.md) to verify the public certificate
-and explicitly trust it if your organization permits it. This is separate from
-signing into the tunnel service.
-Use the published development-signed client build on the local machine: both the connection
-owner and control commands require Windows chain trust and byte-identical client
-images. Unsigned public CI artifacts are for development, not production IPC.
+## What you need
+
+| Requirement | Local client | Remote host |
+| --- | --- | --- |
+| Operating system | Windows | Windows |
+| arTerm component | `arTerm-Client-Setup.exe` | `arTerm-Host-Setup.exe` |
+| Tunnel dependency | Microsoft **devtunnel CLI** | Compatible native **VS Code tunnel CLI**, such as `code-tunnel.exe` or standalone `code.exe` |
+| Tunnel sign-in | Your GitHub account | **The same GitHub account** |
+
+The full VS Code editor is optional when a compatible standalone native CLI is
+provided. Tunnel sign-in is separate from `gh` CLI authentication.
+
+Host setup also requires policy-permitted **Windows Script Host with VBScript** for its per-user bootstrap. If blocked, stop and use an approved route; do not enable it against policy or use a fallback.
+
+Installers detect dependencies and offer downloads only with consent; vendor
+binaries are not bundled. Host setup requires acceptance of the VS Code server
+license terms. Host startup is at **Windows user logon**, not a SYSTEM service:
+a cold boot requires Windows sign-in, and arTerm does not configure autologon.
+
+### Released downloads versus development gates
+
+The [release download route](https://github.com/yeelam-gordon/arterm/releases/latest) currently points to the published
+[v0.7.1 release](https://github.com/yeelam-gordon/arterm/releases/tag/v0.7.1).
+It offers **development-signed**, not publicly trusted production-signed, x64
+and ARM64 archives. Verify checksums and the public certificate using
+[DEVELOPMENT-INSTALL.md](DEVELOPMENT-INSTALL.md); local trust is a separate,
+explicit, policy-permitted decision. Do not bypass SmartScreen, application
+control, Authenticode checks, dependency consent, or the server license prompt.
+
+For source `73c59e0682fbe9a4d966dd48468436248b94e3e7`, the public
+[native Windows CI run](https://github.com/yeelam-gordon/arterm/actions/runs/37918662460)
+completed successfully. The release author reports protected signing gates on
+both architectures; those private results are not independently verified here,
+and the release explicitly excludes real-cloud terminal testing. The pending
+ARM64 rollout discussion in [SIGNING.md](SIGNING.md) describes earlier
+source-change scope, not the current download inventory. Neither the published
+archives nor CI success qualifies this entire development branch: independent
+[file-transfer archive review and direct-input gates](docs/reference.md#release-and-workflow-scope) remain unresolved;
+arbitrary TUIs, custom read-line handlers, and mixed-architecture end-to-end
+operation are not certified by this documentation.
+
+
+
+## Before installation or trust
+
+Choose the v0.7.1 **x64 or ARM64 development-signed ZIP** matching each machine
+from [Releases](https://github.com/yeelam-gordon/arterm/releases/latest).
+If latest changes, use that release's own manifest and evidence.
+Follow [DEVELOPMENT-INSTALL.md](DEVELOPMENT-INSTALL.md) in order: compare the
+ZIP with the public release checksum before extracting; check the pinned CER
+and executable signer; inspect all four executable signatures without running
+them. A digest match is not safety or trust approval. Non-`Valid` signatures,
+unknown signers or mismatches must stop. Any manual current-user certificate
+trust is a separate, explicit policy-permitted decision; after approved trust,
+rerun the complete read-only inspection and require every status to be `Valid`.
+Do not bypass SmartScreen, application controls, download consent or licenses.
+
+Use the published signed client bytes for the connection owner and controls;
+Windows user/logon/session and integrity/elevation context must match.
+Unsigned public CI builds are not substitutes for signed local control.
+
+**Keep session data private.** Retained terminal output, normal shell history,
+and recovery files may expose commands, paths, code or secrets. Protect them on
+both machines; redact sensitive content before sharing logs, screenshots or
+support bundles. DPAPI protection of credentials does not mean every retained
+artifact is encrypted or content-free. The narrower readiness-diagnostic
+content exclusions do not apply to all session data.
 
 Already installed? [Upgrade safely without registering again](#upgrade-without-registering-again).
-
-Host setup requires policy-permitted Windows Script Host/VBScript. Check this before trust or installation; a blocked component is not permission for a policy bypass. Verify ZIP bytes and executable signatures using the linked guide before running either role installer.
 
 ## Remote machine: install and configure the host
 
@@ -181,11 +239,65 @@ replacement. A GUID never creates a replacement for a retired session.
 Unknown, corrupt, unreachable, or unconfirmed records are not silently replaced.
 Do not manually delete recovery files to force reuse.
 
-**Verify the first result before upgrading:** follow the canonical
-[same-shell proof](README.md#prove-that-you-returned-to-the-same-shell) to capture
-and compare the remote PID, variable and working directory across detach/reconnect.
-Expected result: the same values and `True`, with the host still running and
-logged in—not recovery after host reboot or logoff.
+## Prove that you returned to the same shell
+
+After the setup and registration above, use a new reference for this small
+PowerShell check on the **local client**:
+
+```powershell
+arterm connect my-devbox MyProof --shell powershell
+```
+
+In the **attached remote PowerShell**, run:
+
+```powershell
+$artermProof = 'kept-on-host'
+$artermPid = $PID
+$artermCwd = (Get-Location).Path
+$PID; $artermProof; (Get-Location).Path
+```
+
+Note the PID and directory. Press **Ctrl+]** (or close only the local client
+tab). Keep the remote Windows host running and logged in. In a local terminal,
+repeat the **same** command:
+
+```powershell
+arterm connect my-devbox MyProof --shell powershell
+```
+
+In the reattached **remote** shell, run:
+
+```powershell
+$PID; $artermProof; (Get-Location).Path
+($PID -eq $artermPid) -and ($artermProof -eq 'kept-on-host') -and ((Get-Location).Path -eq $artermCwd)
+```
+
+Replay is bounded; keep a remote build log if you need complete output. Reconnection is not an exact screen/history checkpoint.
+
+Expected: the same PID, `kept-on-host`, the same directory, and `True`.
+This demonstrates client detachment, not host reboot recovery. Finish this
+test with `exit` **inside the remote shell**; that ends it deliberately.
+If discovery or sign-in fails, run `arterm doctor my-devbox`, check both tunnel
+accounts and outbound access, and use `arterm --login` for explicit client
+authentication recovery. Do not delete saved recovery records or reinstall a
+running host just because the client disconnected. See
+[first-connection help](#first-connection-help),
+[safe upgrades and stopping](#upgrade-without-registering-again),
+and [trust removal](DEVELOPMENT-INSTALL.md). Ordinary `arterm-host stop` may restart at the next scheduled check; use `arterm-host stop --disable` for a persistent stop after safely finishing sessions. `arterm-host start` restarts the host, not lost shells.
+
+## First-connection help
+
+If discovery or sign-in fails, run `arterm doctor my-devbox`, check that both
+tunnels use the same GitHub account, and check permitted outbound access.
+Use `arterm --login` for explicit client authentication recovery. Keep saved
+recovery records; do not reinstall a running host just because the client lost
+its connection. See [readiness diagnostics](#readiness-diagnostic-logs) for
+managed-control failures and [safe upgrades/stopping](#upgrade-without-registering-again).
+
+`Ctrl+]` detaches only the client; remote `exit` ends the shell. An ordinary
+`arterm-host stop` allows scheduled restart; `arterm-host stop --disable` keeps
+it stopped until explicit `start`. Restarting a host does not restore lost shells.
+Uninstall retains user data; [remove development trust separately](DEVELOPMENT-INSTALL.md).
 
 ### Upgrade without registering again
 
