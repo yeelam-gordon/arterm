@@ -62,6 +62,69 @@ all referenced and published EXEs and the release build outputs must remain
 unchanged after testing.
 Public unsigned CI exercises fixtures, not the signed-production IPC gate.
 
+## Public unsigned development attestations
+
+Manual (`workflow_dispatch`) runs of `.github/workflows/ci.yml` generate
+GitHub build-provenance attestations for exactly four **raw, unsigned EXEs per
+architecture**, after both native x64 and ARM64 build/test jobs succeed.
+Push and pull-request runs do not generate attestations. A separate dependent
+job downloads each architecture's artifact from the same run, checks the
+seven-file allowlist, nonempty unsigned EXEs and checksums, then attests and
+verifies every EXE. Only that job has `id-token: write` and
+`attestations: write`; the build/test jobs retain `contents: read`.
+
+These are **unsigned development evidence, not production signed-release
+provenance**. They bind binary hashes to the public workflow and source identity;
+they do not add Windows Authenticode signatures, establish publisher trust or
+SmartScreen approval, qualify signed-production IPC, or authorize installation
+or execution. No private signing workflow, signer pin, certificate trust policy
+or release publication is changed. Signing or otherwise modifying these bytes
+later requires separate provenance for the resulting bytes.
+
+To inspect a successful manual run without executing its binaries, use a current
+authenticated GitHub CLI. Choose a reviewed run ID, full source commit and full
+branch/tag ref independently; do not assume the latest run is approved:
+
+```powershell
+$repo = 'yeelam-gordon/arterm'
+$runId = '<reviewed-run-id>'
+$sourceSha = '<reviewed-40-hex-source-commit>'
+$sourceRef = 'refs/heads/<reviewed-branch>' # Or refs/tags/<reviewed-tag>
+gh run view $runId --repo $repo --json event,conclusion,headSha,headBranch,url
+if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect run.' }
+# Check workflow_dispatch, success, and the approved source SHA/ref before continuing.
+$binaries = @('arterm.exe','arterm-host.exe','arTerm-Client-Setup.exe','arTerm-Host-Setup.exe')
+foreach ($arch in @('x64','arm64')) {
+    $directory = "attestation-review-$runId\$arch" # Use a fresh directory.
+    if (Test-Path -LiteralPath $directory) { throw "Already exists: $directory" }
+    gh run download $runId --repo $repo --name "arterm-windows-$arch-unsigned" --dir $directory
+    if ($LASTEXITCODE -ne 0) { throw 'Artifact download failed.' }
+    foreach ($name in $binaries) {
+        $path = Join-Path $directory $name
+        if ((Get-Item -LiteralPath $path -ErrorAction Stop).Length -eq 0) { throw "Empty: $path" }
+        if ((Get-AuthenticodeSignature -LiteralPath $path).Status -ne 'NotSigned') {
+            throw "Expected an unsigned development binary: $path"
+        }
+        gh attestation verify $path --repo $repo `
+          --signer-workflow "$repo/.github/workflows/ci.yml" `
+          --source-digest $sourceSha --source-ref $sourceRef --deny-self-hosted-runners
+        if ($LASTEXITCODE -ne 0) { throw "Provenance verification failed: $path" }
+    }
+}
+```
+
+The run ID selects the downloaded artifacts; verification constrains their bytes,
+repository, signer workflow, source SHA/ref and GitHub-hosted attestation runner,
+not a unique invocation (another run at the same SHA/ref can attest identical
+bytes). Review the selected run's jobs and attestation links for invocation
+evidence. Artifacts expire after seven days; an attestation does not retain the
+binaries. GitHub's downloadable transport ZIP, `SHA256SUMS`, license and notice
+files are not attestation subjects. Verify extracted EXEs, not that ZIP.
+Never substitute these unsigned artifacts for the development-signed release
+downloads or bypass the existing [installation trust checks](DEVELOPMENT-INSTALL.md).
+
+## Download contents
+
 The signed download contains exactly nine flat files: `arterm.exe`,
 `arterm-host.exe`, `arTerm-Client-Setup.exe`, `arTerm-Host-Setup.exe`,
 `arTerm-Dev.cer`, `DEVELOPMENT-INSTALL.md`, `LICENSE`,
