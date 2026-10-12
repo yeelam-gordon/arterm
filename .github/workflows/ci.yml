@@ -93,3 +93,83 @@ jobs:
             dist\windows-${{ matrix.arch }}\SHA256SUMS
           if-no-files-found: error
           retention-days: 7
+
+  attest-unsigned:
+    name: Attest unsigned development evidence (${{ matrix.arch }})
+    if: github.event_name == 'workflow_dispatch'
+    needs: windows
+    runs-on: windows-2022
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+    steps:
+      - name: Download this run's native unsigned artifact
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: arterm-windows-${{ matrix.arch }}-unsigned
+          path: unsigned\${{ matrix.arch }}
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+      - name: Validate exact unsigned development subjects
+        shell: pwsh
+        run: |
+          Set-Location 'unsigned\${{ matrix.arch }}'
+          $binaries = @('arterm.exe','arterm-host.exe','arTerm-Client-Setup.exe','arTerm-Host-Setup.exe')
+          $allowed = $binaries + @('LICENSE','THIRD-PARTY-NOTICES.txt','SHA256SUMS')
+          $entries = @(Get-ChildItem -LiteralPath . -Force)
+          if ($entries.Count -ne $allowed.Count) { throw 'Expected exactly seven flat unsigned files.' }
+          foreach ($entry in $entries) {
+            if ($entry.PSIsContainer -or $entry.Name -cnotin $allowed -or
+                ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+              throw "Unexpected unsigned output: $($entry.Name)"
+            }
+          }
+          foreach ($name in $binaries) {
+            if ((Get-Item -LiteralPath $name).Length -eq 0) { throw "Empty subject: $name" }
+            if ((Get-AuthenticodeSignature -LiteralPath $name).Status -ne 'NotSigned') {
+              throw "Attestation subjects must remain unsigned: $name"
+            }
+          }
+          $expected = @(foreach ($name in $allowed | Where-Object { $_ -ne 'SHA256SUMS' } | Sort-Object) {
+            '{0}  {1}' -f (Get-FileHash -LiteralPath $name -Algorithm SHA256).Hash.ToLowerInvariant(), $name
+          })
+          if (Compare-Object $expected @(Get-Content -LiteralPath SHA256SUMS) -CaseSensitive) {
+            throw 'Downloaded unsigned checksums do not match.'
+          }
+      - name: Attest raw EXEs (unsigned development evidence only)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: |
+            unsigned\${{ matrix.arch }}\arterm.exe
+            unsigned\${{ matrix.arch }}\arterm-host.exe
+            unsigned\${{ matrix.arch }}\arTerm-Client-Setup.exe
+            unsigned\${{ matrix.arch }}\arTerm-Host-Setup.exe
+      - name: Verify every unsigned binary against this source and workflow
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $binaries = @('arterm.exe','arterm-host.exe','arTerm-Client-Setup.exe','arTerm-Host-Setup.exe')
+          foreach ($name in $binaries) {
+            gh attestation verify "unsigned\${{ matrix.arch }}\$name" `
+              --repo "$env:GITHUB_REPOSITORY" `
+              --signer-workflow "$env:GITHUB_REPOSITORY/.github/workflows/ci.yml" `
+              --source-digest "$env:GITHUB_SHA" --source-ref "$env:GITHUB_REF" `
+              --deny-self-hosted-runners
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          @"
+          ## Unsigned development evidence: ${{ matrix.arch }}
+          Verified four raw EXEs from run $env:GITHUB_RUN_ID.
+          Source: $env:GITHUB_SHA ($env:GITHUB_REF).
+          These attestations are not Authenticode signatures, production signed-release
+          provenance, signed-production IPC qualification, or approval to install/run.
+          GitHub's transport ZIP is not an attestation subject.
+          "@ | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
