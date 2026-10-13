@@ -61,9 +61,9 @@ jobs:
         run: |
           Set-Location 'dist\windows-${{ matrix.arch }}'
           $allowed = @('arterm.exe','arterm-host.exe','arTerm-Client-Setup.exe',
-                       'arTerm-Host-Setup.exe','LICENSE','THIRD-PARTY-NOTICES.txt','SHA256SUMS')
+                       'arTerm-Host-Setup.exe','LICENSE','THIRD-PARTY-NOTICES.txt','PRIVACY.md','SHA256SUMS')
           $entries = @(Get-ChildItem -LiteralPath . -Force)
-          if ($entries.Count -ne $allowed.Count) { throw 'Unsigned artifact must contain exactly seven files.' }
+          if ($entries.Count -ne $allowed.Count) { throw 'Unsigned artifact must contain exactly eight files.' }
           foreach ($entry in $entries) {
             if ($entry.PSIsContainer -or $entry.Name -cnotin $allowed -or
                 ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
@@ -90,6 +90,7 @@ jobs:
             dist\windows-${{ matrix.arch }}\arTerm-Host-Setup.exe
             dist\windows-${{ matrix.arch }}\LICENSE
             dist\windows-${{ matrix.arch }}\THIRD-PARTY-NOTICES.txt
+            dist\windows-${{ matrix.arch }}\PRIVACY.md
             dist\windows-${{ matrix.arch }}\SHA256SUMS
           if-no-files-found: error
           retention-days: 7

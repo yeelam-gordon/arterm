@@ -40,8 +40,9 @@ against unreviewed changes.
    runtime EXEs, embeds those unchanged bytes, then signs and timestamps both
    installers. The exact signed-production IPC test must execute and pass
    before download assembly and upload.
-4. CI checks the strict download allowlist, recomputes eight SHA-256 checksums,
-   and uploads `arterm-windows-x64-development-signed` for maintainer review.
+4. Before shipping this source, CI must check the strict download allowlist,
+   recompute nine SHA-256 checksums, and upload
+   `arterm-windows-x64-development-signed` for maintainer review.
    This workflow does not publish a release.
 
 Secrets are scoped to the two signing steps on disposable GitHub-hosted
@@ -62,13 +63,20 @@ all referenced and published EXEs and the release build outputs must remain
 unchanged after testing.
 Public unsigned CI exercises fixtures, not the signed-production IPC gate.
 
-The signed download contains exactly nine flat files: `arterm.exe`,
+For packages built from this source, the required signed download contains
+exactly ten flat files: `arterm.exe`,
 `arterm-host.exe`, `arTerm-Client-Setup.exe`, `arTerm-Host-Setup.exe`,
 `arTerm-Dev.cer`, `DEVELOPMENT-INSTALL.md`, `LICENSE`,
-`THIRD-PARTY-NOTICES.txt`, and `SHA256SUMS`.
-Public unsigned artifacts contain exactly seven flat files: the four EXEs,
-`LICENSE`, `THIRD-PARTY-NOTICES.txt`, and `SHA256SUMS` (six hashed entries).
+`THIRD-PARTY-NOTICES.txt`, `PRIVACY.md`, and `SHA256SUMS`.
+Public unsigned artifacts contain exactly eight flat files: the four EXEs,
+`LICENSE`, `THIRD-PARTY-NOTICES.txt`, `PRIVACY.md`, and `SHA256SUMS` (seven hashed entries).
 The recorded public source SHA is in the private workflow summary.
+
+The private pipeline has **not** been changed or run for this privacy addition.
+Before signing/releasing this source, its maintainer must copy the exact
+source `PRIVACY.md`, update its strict allowlist to ten files and hash all nine
+non-manifest entries. Preserve every signing/trust/payload gate. Do not relax
+an old allowlist or claim older published archives contain this notice.
 
 ### ARM64 signing rollout (pending)
 
@@ -92,7 +100,7 @@ same exact approved public `source_ref`. For each target:
    existing signed-production IPC gate with absolute, same-architecture fixture
    paths. Preserve exact-image/certificate enforcement, temporary public-CER
    trust cleanup, and pre/post-test hash checks. Require nonzero test execution.
-4. Check the nine-file signed allowlist, recompute the eight hashed entries,
+4. Check the ten-file signed allowlist, recompute the nine hashed entries,
    and upload `arterm-windows-<x64|arm64>-development-signed` separately.
    Keep the source SHA and target in the workflow summary; do not publish
    downloads until both required native gates pass.
@@ -159,7 +167,7 @@ This builds a debug fixture harness but executes the signed, feature-free
 release products for positive IPC peers. Do not select every ignored test in
 `signed_ipc_e2e`: it also includes other fixtures. Scope selectors to this gate
 and retain the existing temporary trust removal in `finally`, including on
-failure. Assemble the nine-file allowlist and eight checksums only afterward;
+failure. Assemble the ten-file allowlist and nine checksums only afterward;
 upload `arterm-windows-${{ matrix.arch }}-development-signed`. Both matrix jobs
 must pass before maintainers approve either architecture for publication.
 

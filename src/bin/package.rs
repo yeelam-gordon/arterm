@@ -315,13 +315,7 @@ fn run() -> Result<()> {
             Sha256::digest(fs::read(source)?)
         ));
     }
-    for name in ["LICENSE", "THIRD-PARTY-NOTICES.txt"] {
-        fs::copy(root.join(name), dist.join(name)).with_context(|| format!("packaging {name}"))?;
-        hashes.push_str(&format!(
-            "{:x}  {name}\n",
-            Sha256::digest(fs::read(dist.join(name))?)
-        ));
-    }
+    package_documents(&root, &dist, &mut hashes)?;
     fs::write(dist.join("SHA256SUMS"), hashes)?;
     println!(
         "arTerm packages in {}. Installers are not signed by this builder.",
@@ -333,9 +327,35 @@ fn run() -> Result<()> {
     Ok(())
 }
 
+fn package_documents(root: &Path, dist: &Path, hashes: &mut String) -> Result<()> {
+    for name in ["LICENSE", "THIRD-PARTY-NOTICES.txt", "PRIVACY.md"] {
+        fs::copy(root.join(name), dist.join(name)).with_context(|| format!("packaging {name}"))?;
+        hashes.push_str(&format!(
+            "{:x}  {name}\n",
+            Sha256::digest(fs::read(dist.join(name))?)
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn packaged_privacy_is_exact_source_and_checksummed() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let dist = root.join("target").join(format!("package-docs-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&dist).unwrap();
+        let mut hashes = String::new();
+        package_documents(root, &dist, &mut hashes).unwrap();
+        assert_eq!(fs::read_dir(&dist).unwrap().count(), 3);
+        for name in ["LICENSE", "THIRD-PARTY-NOTICES.txt", "PRIVACY.md"] {
+            let bytes = fs::read(root.join(name)).unwrap();
+            assert_eq!(fs::read(dist.join(name)).unwrap(), bytes);
+            assert!(hashes.contains(&format!("{:x}  {name}\n", Sha256::digest(bytes))));
+        }
+        fs::remove_dir_all(dist).unwrap();
+    }
     #[test]
     fn signed_payload_mode_is_explicit_and_strict() {
         assert!(options(&[]).unwrap().payload_dir.is_none());

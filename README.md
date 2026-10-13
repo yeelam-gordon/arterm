@@ -34,6 +34,11 @@ or remote shell `exit` ends the process; arTerm does not resurrect it.
 
 ## Get connected
 
+Before downloading or signing in, read [Privacy and local data](PRIVACY.md).
+This source disables telemetry for its owned VS Code tunnel commands, not all
+vendor services. Recovery retains more than IDs and aliases. New directories
+use arTerm; existing VsTerm state/installations are reused without migration.
+
 **Current downloads are development-signed, not publicly trusted production
 builds.** Before trust, installation or execution, follow the
 [ZIP checksum, pinned certificate and read-only executable signature checks](DEVELOPMENT-INSTALL.md).

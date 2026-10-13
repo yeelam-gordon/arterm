@@ -141,9 +141,8 @@ pub fn start_tunnel() -> Result<Option<Child>> {
     fs::create_dir_all(&host_dir)?;
     let stdout = append_log(&host_dir.join("code-tunnel.stdout.log"))?;
     let stderr = append_log(&host_dir.join("code-tunnel.stderr.log"))?;
-    let child = isolated_code_command(&code, &root)
+    let child = isolated_tunnel_command(&code, &code_data_dir(&root))
         .args([
-            "tunnel",
             "--name",
             &config.name,
             "--accept-server-license-terms",
@@ -158,6 +157,7 @@ pub fn start_tunnel() -> Result<Option<Child>> {
 }
 
 fn setup(args: SetupArgs) -> Result<()> {
+    eprintln!("{}", deployment::PRIVACY_NOTICE);
     require_user_session()?;
     if let Some(path) = &args.code_path {
         ensure!(
@@ -284,6 +284,7 @@ fn prepare_setup_host(
 }
 
 fn login() -> Result<()> {
+    eprintln!("{}", deployment::PRIVACY_NOTICE);
     require_user_session()?;
     let root = deployment::data_root()?;
     let config = require_config(&root)?;
@@ -347,7 +348,7 @@ fn doctor() -> Result<()> {
 
     let code = match deployment::ensure_dependency(Role::Host, Some(&config.code_path), true) {
         Ok(code) => {
-            let mut command = Command::new(&code);
+            let mut command = deployment::code_command(&code);
             command.arg("--version");
             match crate::transport::output_bounded(command, Duration::from_secs(10)) {
                 Ok(output) if output.status.success() => {
@@ -525,10 +526,8 @@ fn login_if_needed(code: &Path, cli_data: &Path) -> Result<()> {
         io::stdin().is_terminal(),
         "isolated VS Code tunnel login is required; rerun `arterm-host login` interactively"
     );
-    let status = Command::new(code)
-        .arg("--cli-data-dir")
-        .arg(cli_data)
-        .args(["tunnel", "user", "login", "--provider", "github"])
+    let status = isolated_tunnel_command(code, cli_data)
+        .args(["user", "login", "--provider", "github"])
         .status()
         .context("launch isolated GitHub login")?;
     ensure!(
@@ -543,11 +542,8 @@ fn login_if_needed(code: &Path, cli_data: &Path) -> Result<()> {
 }
 
 fn inspect_auth(code: &Path, cli_data: &Path) -> Result<AuthState> {
-    let mut command = Command::new(code);
-    command
-        .arg("--cli-data-dir")
-        .arg(cli_data)
-        .args(["tunnel", "user", "show"]);
+    let mut command = isolated_tunnel_command(code, cli_data);
+    command.args(["user", "show"]);
     let output = crate::transport::output_bounded(command, Duration::from_secs(10))
         .context("inspect isolated VS Code tunnel account")?;
     let text = combined_output(&output);
@@ -579,15 +575,16 @@ fn inspect_auth(code: &Path, cli_data: &Path) -> Result<AuthState> {
     Ok(AuthState::LoggedIn)
 }
 
-fn isolated_code_command(code: &Path, root: &Path) -> Command {
-    let mut command = Command::new(code);
-    command.arg("--cli-data-dir").arg(code_data_dir(root));
+fn isolated_tunnel_command(code: &Path, cli_data: &Path) -> Command {
+    let mut command = deployment::code_command(code);
+    command.arg("--cli-data-dir").arg(cli_data)
+        .arg("tunnel");
     command
 }
 
 fn tunnel_status(code: &Path, root: &Path) -> Result<Output> {
-    let mut command = isolated_code_command(code, root);
-    command.args(["tunnel", "status"]);
+    let mut command = isolated_tunnel_command(code, &code_data_dir(root));
+    command.arg("status");
     crate::transport::output_bounded(command, Duration::from_secs(5))
         .context("inspect isolated VS Code tunnel status")
 }
@@ -868,12 +865,14 @@ fn ensure_help_only(args: &[String], print_help: fn()) -> Result<()> {
 }
 
 fn print_setup_help() {
+    println!("{}", deployment::PRIVACY_NOTICE);
     println!(
         "arterm-host setup [--name <lowercase-name>] [--code-path <absolute-code-tunnel.exe>] [--no-download] [--accept-server-license-terms] [--terminate-sessions] [--force-stop-host]\nExisting name and Code CLI path are retained unless explicitly supplied. First setup requires --name.\n--terminate-sessions gracefully stops this user/logon/data-root host and ends its sessions.\n--force-stop-host bypasses graceful shutdown and ends ALL sessions of matching host executable paths for the current user/logon, including other data roots. Other installations/users are not killed.\nConfigures an isolated GitHub-backed VS Code tunnel, per-user startup, and the native host."
     );
 }
 
 fn print_login_help() {
+    println!("{}", deployment::PRIVACY_NOTICE);
     println!(
         "arterm-host login\nLogs in the configured isolated VS Code tunnel account using GitHub."
     );
@@ -890,6 +889,29 @@ fn print_doctor_help() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn privacy_defaults_disable_telemetry_for_every_owned_tunnel_operation() {
+        let code = Path::new(r"C:\tools\code-tunnel.exe");
+        let data = Path::new(r"C:\arTerm data\code-cli");
+        for operation in [
+            vec!["--name", "box", "--accept-server-license-terms"],
+            vec!["user", "login", "--provider", "github"],
+            vec!["user", "show"],
+            vec!["status"],
+        ] {
+            let mut command = isolated_tunnel_command(code, data);
+            command.args(&operation);
+            let args = command.get_args().collect::<Vec<_>>();
+            let mut expected = vec![
+                OsStr::new("--disable-telemetry"),
+                OsStr::new("--cli-data-dir"), data.as_os_str(),
+                OsStr::new("tunnel"),
+            ];
+            expected.extend(operation.iter().map(OsStr::new));
+            assert_eq!(command.get_program(), code.as_os_str());
+            assert_eq!(args, expected);
+        }
+    }
 
     #[test]
     fn startup_readiness_separates_missing_setup_or_license_from_expired_auth() {

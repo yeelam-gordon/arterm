@@ -13,7 +13,8 @@ arterm-host login | start | doctor\n\
 arterm-host status [--json] | sessions [--json]\n\
 arterm-host terminate <session-id> --yes [--json]\n\
 arterm-host stop [--terminate-sessions] [--disable] [--json]\n\
-arterm-host --help | --version\n\
+arterm-host --help | --version | --privacy\n\
+Privacy: read packaged PRIVACY.md or arterm-host --privacy before downloads/sign-in.\n\
 Internal: run | ensure-running --data-root ROOT | bridge --protocol vsterm-session-v1\n\
 Ordinary stop permits restart at the next 10-minute task check; --disable prevents future checks until explicit start.\n\
 Sessions have no idle or age TTL; they end only on shell exit, explicit termination, host failure, logoff, or reboot.");
@@ -38,6 +39,10 @@ fn main() {
     if scheduled { eprintln!("[host] stopped normally pid={}", std::process::id()); }
 }
 fn entry(args: &[String]) -> Result<()> {
+    if args == ["--privacy"] {
+        println!("{}", arterm::deployment::PRIVACY);
+        return Ok(());
+    }
     if args.first().map(String::as_str) == Some("ensure-running") && args.len() == 3 && args[1] == "--data-root" {
         ensure!(std::path::Path::new(&args[2]).is_absolute(), "scheduled data root must be absolute");
         std::env::set_var("VSTERM_REMOTE_HOME", &args[2]);

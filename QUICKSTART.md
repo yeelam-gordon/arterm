@@ -3,6 +3,11 @@
 Install the **host** on the remote Windows machine and the **client** locally.
 This is the canonical ordered setup and same-shell verification route.
 
+Before downloads or sign-in, read [Privacy and local data](PRIVACY.md) for
+stored data, legacy-directory reuse, deletion and vendor telemetry boundaries.
+The notice describes this source, not a claim about earlier released binaries;
+packages built from it also expose the notice offline with `--privacy`.
+
 ## What you need
 
 | Requirement | Local client | Remote host |
@@ -140,7 +145,7 @@ the installer itself never signs in. Run the registration command
 the host printed in PowerShell. For example (use the actual remote host path):
 
 ```powershell
-arterm.exe add my-devbox --tunnel my-devbox --host-path 'C:\Tools\VsTerm\Host\arterm-host.exe'
+arterm.exe add my-devbox --tunnel my-devbox --host-path 'C:\Tools\arTerm\Host\arterm-host.exe'
 ```
 
 This saves the friendly name and host path, not a generated tunnel ID.
@@ -319,7 +324,8 @@ VBScript is required for the hidden bootstrap and is checked before registration
 The installer does not reset setup, tunnel identity, registered client boxes,
 protected credentials, named session references, or certificates. Uninstall also
 retains user data. Keep the same Windows user and `VSTERM_REMOTE_HOME` (default:
-`%LOCALAPPDATA%\VsTerm`); another user/root reads different state, not a migration.
+`%LOCALAPPDATA%\arTerm`, reusing existing `%LOCALAPPDATA%\VsTerm`); another
+user/root reads different state, not a migration. See [root selection](PRIVACY.md#where-data-lives).
 Do not remove that directory or register the box again just to upgrade.
 
 Repeated `arterm-host setup` retains the saved name and Code CLI path; `--name`
@@ -523,8 +529,11 @@ When `send --command` times out, keep its **Command ID** and the printed
 **Readiness log** path. Starting with 0.6.1, an owning client and host write
 privacy-limited JSONL diagnostics automatically:
 
-- Client: `%LOCALAPPDATA%\VsTerm\client\diagnostics`
-- Host: `%LOCALAPPDATA%\VsTerm\host\diagnostics`
+- Client: `<data-root>\client\diagnostics`
+- Host: `<data-root>\host\diagnostics`
+
+See [data-root selection](PRIVACY.md#where-data-lives); existing VsTerm roots
+remain in use.
 
 If `VSTERM_REMOTE_HOME` is set, use that root instead. Collect the matching
 `readiness-v1-*.jsonl` and rotated `.jsonl.1` files from both endpoints soon after
@@ -746,8 +755,9 @@ it while relying on live shells. No automatic host upgrade is performed.
 
 arTerm 0.5 retains VsTerm GUID recovery records and byte-identical legacy
 executable aliases (`vsterm.exe` / `vsterm-host.exe`).
-Both fresh and upgraded installs keep configuration under
-`%LOCALAPPDATA%\VsTerm`. It does not automatically import or delete the older
+This source uses arTerm for fresh data/install directories and reuses existing
+VsTerm directories without moving or merging state; see the authoritative
+[path selection rules](PRIVACY.md#where-data-lives). It does not automatically import or delete the older
 `%LOCALAPPDATA%\DevBoxRemote` state. Finish old sessions before uninstalling the
 prototype host, and configure arTerm afresh. Prototype GUIDs are not imported;
 existing VsTerm GUIDs and configured targets remain unchanged.
