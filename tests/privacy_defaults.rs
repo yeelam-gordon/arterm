@@ -1,5 +1,8 @@
 use std::{fs, path::{Path, PathBuf}, process::Command, time::Duration};
 
+const INSTALLER_PRIVACY_FLAGS: &[&str] =
+    &["--privacy", "/privacy", "--Privacy", "/PRIVACY", "--pRiVaCy", "/pRiVaCy"];
+
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
@@ -27,13 +30,39 @@ fn installer_privacy_is_case_insensitive_and_available_without_a_data_root() {
         env!("CARGO_BIN_EXE_arTerm-Client-Setup"),
         env!("CARGO_BIN_EXE_arTerm-Host-Setup"),
     ] {
-        for flag in ["--privacy", "/privacy", "--Privacy", "/PRIVACY", "--pRiVaCy", "/pRiVaCy"] {
+        for flag in INSTALLER_PRIVACY_FLAGS {
             assert_offline_privacy(exe, flag);
         }
     }
 }
 
-fn assert_offline_privacy(exe: &str, flag: &str) {
+#[test]
+#[ignore = "requires explicit ARTERM_PRIVACY_PACKAGE_DIR containing native packaged executables"]
+fn packaged_privacy_is_available_offline_without_a_data_root() {
+    let directory = PathBuf::from(std::env::var_os("ARTERM_PRIVACY_PACKAGE_DIR")
+        .expect("ARTERM_PRIVACY_PACKAGE_DIR is required when selecting the packaged privacy gate"));
+    assert!(directory.is_absolute(), "ARTERM_PRIVACY_PACKAGE_DIR must be absolute");
+    let directory = directory.canonicalize().expect("packaged privacy directory must exist");
+    let executables = [
+        ("arterm.exe", false), ("arterm-host.exe", false),
+        ("arTerm-Client-Setup.exe", true), ("arTerm-Host-Setup.exe", true),
+    ];
+    for (name, _) in executables {
+        assert!(directory.join(name).is_file(), "missing packaged executable: {name}");
+    }
+    assert_eq!(fs::read(directory.join("PRIVACY.md")).expect("packaged PRIVACY.md must exist"),
+        fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("PRIVACY.md")).unwrap());
+    for (name, installer) in executables {
+        let flags = if installer { INSTALLER_PRIVACY_FLAGS } else { &["--privacy"] };
+        for flag in flags {
+            assert_offline_privacy(directory.join(name), flag);
+        }
+    }
+}
+
+fn assert_offline_privacy(exe: impl AsRef<Path>, flag: &str) {
+    let exe = exe.as_ref();
+    let display = exe.display();
     let fixture = Fixture::new();
     let mut command = Command::new(exe);
     command.arg(flag).env_remove("LOCALAPPDATA")
@@ -42,8 +71,8 @@ fn assert_offline_privacy(exe: &str, flag: &str) {
         command.env(name, &fixture.0);
     }
     let output = arterm::transport::output_bounded(command, Duration::from_secs(10)).unwrap();
-    assert!(output.status.success(), "{exe} {flag}: {}", String::from_utf8_lossy(&output.stderr));
-    assert!(output.stderr.is_empty(), "{exe} {flag} unexpectedly wrote stderr");
+    assert!(output.status.success(), "{display} {flag}: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(output.stderr.is_empty(), "{display} {flag} unexpectedly wrote stderr");
     assert_eq!(String::from_utf8(output.stdout).unwrap().replace("\r\n", "\n").trim(),
         arterm::deployment::PRIVACY.replace("\r\n", "\n").trim());
     assert_eq!(fs::read_dir(&fixture.0).unwrap().count(), 0);
