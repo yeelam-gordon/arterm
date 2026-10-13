@@ -11,10 +11,10 @@
 Keep builds and coding agents running when your client or VPN disconnects.
 Return to the same interactive shell, then catch up on retained output.
 
-<img src=".github/arterm-before-after.png" width="700" alt="Three actions: remote work continues after the client disconnects; reattach to the same shell with its variables and directory; read retained output, with possible gaps. The host must keep running and stay logged in.">
+<img src=".github/arterm-before-after.png" width="700" alt="Concept: use a Windows/Dev Box terminal instead of a full RDP desktop stream. After client network loss or closing the notebook lid, reconnect to the same surviving Shell 7: PowerShell MODE remains dev. The remote host must stay running and logged in.">
 
 *Workflow illustration, not a live screenshot or test evidence. English labels;
-[editable image source](.github/arterm-before-after.svg).*
+[SVG illustration](.github/arterm-before-after.svg).*
 
 - **Work keeps running:** leave the build or agent on the remote host.
 - **Return to the same shell:** keep its process, variables and working directory.

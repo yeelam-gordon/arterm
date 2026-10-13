@@ -12,7 +12,7 @@
 
 [设置](#native-setup) · [验证同一 shell](#native-proof) · [核验下载与信任 (英文)](../../DEVELOPMENT-INSTALL.md)
 
-<img src="../../.github/arterm-before-after.png" width="700" alt="三项作用：断线后主机工作继续；回到相同 shell、变量与目录；补看保留输出。回放有上限，可能缺失；主机须运行且已登录。">
+<img src="../../.github/arterm-before-after.png" width="700" alt="概念图：使用 Windows/Dev Box 终端，而不是完整 RDP 桌面串流。客户端网络中断或合上笔记本后，重新连接同一仍在运行的 Shell 7，PowerShell 的 MODE 仍为 dev。远程主机必须保持运行且已登录。">
 
 *流程示意图；英文标签，不是实际截图或测试证明。*
 

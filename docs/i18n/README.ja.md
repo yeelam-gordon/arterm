@@ -12,7 +12,7 @@
 
 [設定](#native-setup) · [同じシェルを確認](#native-proof) · [ダウンロードと信頼を確認 (英語)](../../DEVELOPMENT-INSTALL.md)
 
-<img src="../../.github/arterm-before-after.png" width="700" alt="三つの動作：切断後もホストで作業継続、同じシェル・変数・ディレクトリへ再接続、保持された出力の確認。再生は有限で欠落もあります。ホストは稼働・ログインを維持します。">
+<img src="../../.github/arterm-before-after.png" width="700" alt="概念図：フル RDP デスクトップ配信の代わりに Windows/Dev Box ターミナルを使用する。クライアントの通信断やノート PC を閉じた後、存続している同じ Shell 7 に再接続すると PowerShell の MODE は dev のまま。リモートホストは稼働し、ログイン状態を維持する必要がある。">
 
 *ワークフローの模式図。ラベルは英語で、実画面やテスト証拠ではありません。*
 

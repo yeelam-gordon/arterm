@@ -12,7 +12,7 @@ Saat klien atau VPN terputus, build dan agen tetap berjalan di Windows jarak jau
 
 [Siapkan](#native-setup) · [Buktikan shell yang sama](#native-proof) · [Periksa unduhan dan kepercayaan (Inggris)](../../DEVELOPMENT-INSTALL.md)
 
-<img src="../../.github/arterm-before-after.png" width="700" alt="Tiga tindakan: pekerjaan terus berjalan tanpa klien; kembali ke shell, variabel dan direktori yang sama; lihat keluaran tersimpan. Pemutaran ulang terbatas dan mungkin ada celah. Host tetap berjalan dan pengguna tetap masuk.">
+<img src="../../.github/arterm-before-after.png" width="700" alt="Konsep: terminal Windows/Dev Box alih-alih aliran seluruh desktop RDP. Setelah jaringan klien terputus atau notebook ditutup, sambungkan kembali Shell 7 yang sama dan masih berjalan: MODE PowerShell tetap dev. Host jarak jauh harus tetap berjalan dan masuk.">
 
 *Ilustrasi alur dengan label Inggris, bukan tangkapan nyata atau bukti pengujian.*
 

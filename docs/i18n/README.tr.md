@@ -12,7 +12,7 @@
 
 [Kur](#native-setup) · [Aynı kabuğu doğrula](#native-proof) · [İndirmeyi ve güveni doğrula (İngilizce)](../../DEVELOPMENT-INSTALL.md)
 
-<img src="../../.github/arterm-before-after.png" width="700" alt="Üç eylem: istemci ayrılsa da iş sürer; aynı kabuk, değişkenler ve dizine dönün; saklanan çıktıyı okuyun. Yeniden oynatma sınırlıdır, boşluklar olabilir. Uzak bilgisayar çalışır ve oturum açık kalır.">
+<img src="../../.github/arterm-before-after.png" width="700" alt="Kavram: tam RDP masaüstü akışı yerine Windows/Dev Box terminali. İstemci ağı kesilince veya dizüstü kapağı kapanınca aynı yaşayan Shell 7’ye yeniden bağlanın: PowerShell MODE dev olarak kalır. Uzak host çalışmaya ve oturum açık kalmaya devam etmelidir.">
 
 *İngilizce etiketli iş akışı çizimi; gerçek ekran görüntüsü veya test kanıtı değil.*
 

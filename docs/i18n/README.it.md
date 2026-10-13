@@ -12,7 +12,7 @@ Se il client o la VPN si disconnettono, build e agenti continuano sul Windows re
 
 [Configura](#native-setup) · [Verifica la stessa shell](#native-proof) · [Verifica download e fiducia (inglese)](../../DEVELOPMENT-INSTALL.md)
 
-<img src="../../.github/arterm-before-after.png" width="700" alt="Tre azioni: il lavoro continua senza il client; torna alla stessa shell, variabili e directory; consulta l’output conservato. La riproduzione è limitata e può avere lacune. L’host resta in esecuzione con la sessione aperta.">
+<img src="../../.github/arterm-before-after.png" width="700" alt="Concetto: terminale Windows/Dev Box invece dello streaming completo del desktop RDP. Dopo una perdita di rete del client o la chiusura del portatile, riconnetti la stessa Shell 7 ancora attiva: MODE di PowerShell resta dev. L’host remoto deve restare attivo e con sessione aperta.">
 
 *Illustrazione del flusso con etichette inglesi, non schermata reale né prova di test.*
 

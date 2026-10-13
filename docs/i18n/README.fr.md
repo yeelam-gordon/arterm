@@ -12,7 +12,7 @@ Quand le client ou le VPN se déconnecte, compilations et agents continuent sur 
 
 [Configurer](#native-setup) · [Vérifier le même shell](#native-proof) · [Vérifier téléchargement et confiance (anglais)](../../DEVELOPMENT-INSTALL.md)
 
-<img src="../../.github/arterm-before-after.png" width="700" alt="Trois actions : le travail continue sans le client ; retrouvez le même shell, ses variables et son répertoire ; consultez la sortie conservée. Le rejeu est borné et peut présenter des lacunes. L’hôte reste en marche avec une session ouverte.">
+<img src="../../.github/arterm-before-after.png" width="700" alt="Concept : terminal Windows/Dev Box plutôt qu’un flux complet de bureau RDP. Après perte du réseau client ou fermeture du portable, reconnectez le même Shell 7 encore actif : MODE PowerShell reste dev. L’hôte distant doit rester actif avec une session ouverte.">
 
 *Illustration du flux, avec libellés anglais : ni capture réelle ni preuve de test.*
 

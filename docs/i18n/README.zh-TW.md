@@ -12,7 +12,7 @@
 
 [設定](#native-setup) · [驗證同一 shell](#native-proof) · [驗證下載與信任 (英文)](../../DEVELOPMENT-INSTALL.md)
 
-<img src="../../.github/arterm-before-after.png" width="700" alt="三項作用：斷線後主機工作繼續；回到相同 shell、變數與目錄；補看保留輸出。回放有上限，可能缺漏；主機須運作且已登入。">
+<img src="../../.github/arterm-before-after.png" width="700" alt="概念圖：使用 Windows/Dev Box 終端，而不是完整 RDP 桌面串流。用戶端網路中斷或闔上筆電後，重新連接同一仍在執行的 Shell 7，PowerShell 的 MODE 仍為 dev。遠端主機必須保持執行且已登入。">
 
 *工作流程示意圖；英文標籤，不是實際畫面或測試證明。*
 

@@ -12,7 +12,7 @@ Khi máy khách hoặc VPN mất kết nối, tác vụ biên dịch và tác nh
 
 [Thiết lập](#native-setup) · [Kiểm tra cùng shell](#native-proof) · [Kiểm tra bản tải và tin cậy (tiếng Anh)](../../DEVELOPMENT-INSTALL.md)
 
-<img src="../../.github/arterm-before-after.png" width="700" alt="Ba thao tác: công việc tiếp tục khi máy khách ngắt; trở lại cùng shell, biến và thư mục; xem đầu ra được giữ. Phát lại có giới hạn, có thể thiếu đoạn. Máy chủ vẫn chạy và người dùng vẫn đăng nhập.">
+<img src="../../.github/arterm-before-after.png" width="700" alt="Minh họa: dùng terminal Windows/Dev Box thay vì truyền toàn bộ desktop RDP. Sau khi client mất mạng hoặc đóng nắp máy, kết nối lại cùng Shell 7 vẫn hoạt động: MODE PowerShell vẫn là dev. Host từ xa phải tiếp tục chạy và còn đăng nhập.">
 
 *Hình minh họa quy trình, nhãn tiếng Anh; không phải ảnh thực tế hay bằng chứng kiểm thử.*
 

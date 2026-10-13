@@ -12,7 +12,7 @@
 
 [설정](#native-setup) · [같은 셸 확인](#native-proof) · [다운로드와 신뢰 확인 (영어)](../../DEVELOPMENT-INSTALL.md)
 
-<img src="../../.github/arterm-before-after.png" width="700" alt="세 가지 동작: 연결이 끊겨도 호스트에서 작업 지속, 같은 셸·변수·디렉터리로 복귀, 보관된 출력 확인. 재생은 제한되어 누락이 있을 수 있습니다. 호스트는 실행 및 로그인 상태를 유지해야 합니다.">
+<img src="../../.github/arterm-before-after.png" width="700" alt="개념도: 전체 RDP 데스크톱 스트림 대신 Windows/Dev Box 터미널을 사용합니다. 클라이언트 네트워크 단절이나 노트북 덮개 닫기 후 살아 있는 같은 Shell 7에 다시 연결하면 PowerShell MODE는 dev로 유지됩니다. 원격 호스트는 실행 중이고 로그인되어 있어야 합니다.">
 
 *작업 흐름 설명용 그림입니다. 영어 표시이며 실제 화면이나 테스트 증거가 아닙니다.*
 

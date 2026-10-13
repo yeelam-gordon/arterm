@@ -12,7 +12,7 @@ Bei Client- oder VPN-Abbruch laufen Builds und Coding-Agenten auf dem Windows-Ho
 
 [Einrichten](#native-setup) · [Dieselbe Shell prüfen](#native-proof) · [Download und Vertrauen prüfen (Englisch)](../../DEVELOPMENT-INSTALL.md)
 
-<img src="../../.github/arterm-before-after.png" width="700" alt="Drei Aktionen: Arbeit läuft trotz Client-Abbruch; dieselbe Shell mit Variablen und Verzeichnis wieder verbinden; gespeicherte Ausgabe nachlesen. Die Wiedergabe ist begrenzt, Lücken sind möglich. Der Host läuft und der Benutzer bleibt angemeldet.">
+<img src="../../.github/arterm-before-after.png" width="700" alt="Konzept: Windows/Dev-Box-Terminal statt vollständigem RDP-Desktopstream. Nach Client-Netzverlust oder Zuklappen des Notebooks dieselbe noch laufende Shell 7 wiederverbinden: PowerShell MODE bleibt dev. Der entfernte Host muss weiterlaufen und angemeldet bleiben.">
 
 *Ablaufillustration mit englischen Beschriftungen, kein echter Screenshot oder Testnachweis.*
 
