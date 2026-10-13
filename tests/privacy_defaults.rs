@@ -16,16 +16,37 @@ impl Drop for Fixture {
 #[test]
 fn privacy_is_available_offline_without_a_data_root() {
     for exe in [env!("CARGO_BIN_EXE_arterm"), env!("CARGO_BIN_EXE_arterm-host")] {
-        let fixture = Fixture::new();
-        let mut command = Command::new(exe);
-        command.arg("--privacy").env_remove("LOCALAPPDATA")
-            .env_remove("VSTERM_REMOTE_HOME").current_dir(&fixture.0);
-        let output = arterm::transport::output_bounded(command, Duration::from_secs(10)).unwrap();
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        assert_eq!(String::from_utf8(output.stdout).unwrap().replace("\r\n", "\n").trim(),
-            arterm::deployment::PRIVACY.replace("\r\n", "\n").trim());
-        assert_eq!(fs::read_dir(&fixture.0).unwrap().count(), 0);
+        assert_offline_privacy(exe, "--privacy");
     }
+}
+
+#[cfg(feature = "installers")]
+#[test]
+fn installer_privacy_is_case_insensitive_and_available_without_a_data_root() {
+    for exe in [
+        env!("CARGO_BIN_EXE_arTerm-Client-Setup"),
+        env!("CARGO_BIN_EXE_arTerm-Host-Setup"),
+    ] {
+        for flag in ["--privacy", "/privacy", "--Privacy", "/PRIVACY", "--pRiVaCy", "/pRiVaCy"] {
+            assert_offline_privacy(exe, flag);
+        }
+    }
+}
+
+fn assert_offline_privacy(exe: &str, flag: &str) {
+    let fixture = Fixture::new();
+    let mut command = Command::new(exe);
+    command.arg(flag).env_remove("LOCALAPPDATA")
+        .env_remove("VSTERM_REMOTE_HOME").current_dir(&fixture.0);
+    for name in ["USERPROFILE", "HOME", "APPDATA", "TEMP", "TMP"] {
+        command.env(name, &fixture.0);
+    }
+    let output = arterm::transport::output_bounded(command, Duration::from_secs(10)).unwrap();
+    assert!(output.status.success(), "{exe} {flag}: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(output.stderr.is_empty(), "{exe} {flag} unexpectedly wrote stderr");
+    assert_eq!(String::from_utf8(output.stdout).unwrap().replace("\r\n", "\n").trim(),
+        arterm::deployment::PRIVACY.replace("\r\n", "\n").trim());
+    assert_eq!(fs::read_dir(&fixture.0).unwrap().count(), 0);
 }
 
 #[test]

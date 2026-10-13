@@ -802,7 +802,7 @@ fn resume_host_task(
 }
 
 pub fn installer_with_args(role: Role, payload: &[u8], args: &[String]) -> Result<()> {
-    if args == ["--privacy"] || args == ["/privacy"] {
+    if args.len() == 1 && matches!(args[0].to_ascii_lowercase().as_str(), "--privacy" | "/privacy") {
         println!("{PRIVACY}");
         return Ok(());
     }

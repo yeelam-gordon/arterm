@@ -428,7 +428,20 @@ cargo run --locked --release --bin package -- --target x86_64-pc-windows-msvc
 cargo run --locked --release --bin package -- --target aarch64-pc-windows-msvc
 ```
 
-These write separate `dist\windows-x64` and `dist\windows-arm64` directories,
+After packaging, test the offline privacy notice in both runtimes and both
+installers (use the native target and matching architecture directory):
+
+```powershell
+$env:VSTERM_CLIENT_PAYLOAD = (Resolve-Path 'dist\windows-x64\arterm.exe').Path
+$env:VSTERM_HOST_PAYLOAD = (Resolve-Path 'dist\windows-x64\arterm-host.exe').Path
+cargo test --locked --target x86_64-pc-windows-msvc --features installers --test privacy_defaults -- --test-threads=1
+```
+
+The installer-feature test covers case-insensitive `--privacy` and `/privacy`,
+with no data-root environment and isolated profile paths. Public CI runs it
+after packaging on each native architecture.
+
+The package commands write separate `dist\windows-x64` and `dist\windows-arm64` directories,
 each with its own seven-entry `SHA256SUMS` and the same eight filenames above.
 No `--target` still selects x64 and the legacy flat `dist` output. The builder
 always uses an explicit Cargo target for runtimes and installers; intermediate
