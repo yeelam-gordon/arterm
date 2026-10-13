@@ -360,10 +360,10 @@ byte-identical `vsterm.exe` / `vsterm-host.exe` compatibility aliases in the sam
 role directories. Existing absolute commands and registered host paths remain
 valid without rewriting target configuration or recovery records.
 
-The following remain stable compatibility identifiers, even on fresh installs:
+Directory selection in this source follows [Privacy: where data lives](../PRIVACY.md#where-data-lives):
 
-- Data and protected state: `%LOCALAPPDATA%\VsTerm`.
-- Installed binaries: `%LOCALAPPDATA%\Programs\VsTerm\Client` or `Host`.
+- New data and protected state: `%LOCALAPPDATA%\arTerm`; existing `%LOCALAPPDATA%\VsTerm` wins, including mixed layouts.
+- New installed binaries: `%LOCALAPPDATA%\Programs\arTerm\Client` or `Host`; existing VsTerm role directories are reused.
 - Existing registry keys, pipe identity, and session protocol (legacy startup migrates to Task Scheduler).
 
 New ownership markers use arTerm. Both legacy VsTerm publisher markers remain
@@ -412,7 +412,7 @@ cargo run --locked --release --bin package
 
 The package builder writes `arterm.exe`, `arterm-host.exe`,
 `arTerm-Client-Setup.exe`, `arTerm-Host-Setup.exe`, `LICENSE`,
-`THIRD-PARTY-NOTICES.txt`, and `SHA256SUMS`
+`THIRD-PARTY-NOTICES.txt`, `PRIVACY.md`, and `SHA256SUMS`
 to `dist`. Installers embed only the project's own executables. For runtime-only
 builds:
 
@@ -428,8 +428,32 @@ cargo run --locked --release --bin package -- --target x86_64-pc-windows-msvc
 cargo run --locked --release --bin package -- --target aarch64-pc-windows-msvc
 ```
 
-These write separate `dist\windows-x64` and `dist\windows-arm64` directories,
-each with its own six-entry `SHA256SUMS` and the same seven filenames above.
+After packaging, test the offline privacy notice in the exact four distributed
+EXEs (use the native target and matching architecture directory):
+
+```powershell
+$env:ARTERM_PRIVACY_PACKAGE_DIR = (Resolve-Path 'dist\windows-x64').Path
+cargo test --locked --target x86_64-pc-windows-msvc --test privacy_defaults -- --ignored --exact packaged_privacy_is_available_offline_without_a_data_root --test-threads=1
+```
+
+This explicitly selected gate requires an absolute package directory; it fails
+rather than skipping if the directory, any EXE or policy is missing. It launches
+the files from that directory, not Cargo's test-built executables. Public CI
+runs it after packaging on each native architecture and requires one passing
+test with none ignored. Both runtime and mixed-case installer flags are checked
+with no data-root environment and isolated profile paths.
+
+The separate installer-feature regression tests exercise test-built EXEs, not
+distributed bytes. To run those using matching package runtime inputs:
+
+```powershell
+$env:VSTERM_CLIENT_PAYLOAD = (Resolve-Path 'dist\windows-x64\arterm.exe').Path
+$env:VSTERM_HOST_PAYLOAD = (Resolve-Path 'dist\windows-x64\arterm-host.exe').Path
+cargo test --locked --target x86_64-pc-windows-msvc --features installers --test privacy_defaults -- --test-threads=1
+```
+
+The package commands write separate `dist\windows-x64` and `dist\windows-arm64` directories,
+each with its own seven-entry `SHA256SUMS` and the same eight filenames above.
 No `--target` still selects x64 and the legacy flat `dist` output. The builder
 always uses an explicit Cargo target for runtimes and installers; intermediate
 outputs are `target\<triple>\release` (or under `CARGO_TARGET_DIR`).

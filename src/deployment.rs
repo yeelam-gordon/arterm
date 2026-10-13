@@ -28,27 +28,42 @@ pub enum Role {
     Host,
 }
 
+pub const PRIVACY: &str = include_str!("../PRIVACY.md");
+pub const PRIVACY_NOTICE: &str =
+    "Privacy: read packaged PRIVACY.md or run arterm --privacy / arterm-host --privacy before downloads or sign-in. Recovery data includes more than IDs and aliases.";
+
 pub fn data_root() -> Result<PathBuf> {
     if let Some(root) = std::env::var_os("VSTERM_REMOTE_HOME") {
         return Ok(PathBuf::from(root));
     }
-    Ok(
-        PathBuf::from(std::env::var_os("LOCALAPPDATA").context("LOCALAPPDATA is unset")?)
-            .join("VsTerm"),
-    )
+    let local = PathBuf::from(std::env::var_os("LOCALAPPDATA").context("LOCALAPPDATA is unset")?);
+    compatible_directory(local.join("arTerm"), local.join("VsTerm"))
 }
 
 pub fn install_dir(role: Role) -> Result<PathBuf> {
-    Ok(
-        PathBuf::from(std::env::var_os("LOCALAPPDATA").context("LOCALAPPDATA is unset")?)
-            .join("Programs")
-            .join("VsTerm")
-            .join(if role == Role::Client {
-                "Client"
-            } else {
-                "Host"
-            }),
+    let local = PathBuf::from(std::env::var_os("LOCALAPPDATA").context("LOCALAPPDATA is unset")?);
+    install_dir_under(&local, role)
+}
+
+fn install_dir_under(local: &Path, role: Role) -> Result<PathBuf> {
+    let programs = local.join("Programs");
+    compatible_directory(
+        programs.join("arTerm").join(role_name(role)),
+        programs.join("VsTerm").join(role_name(role)),
     )
+}
+
+fn compatible_directory(current: PathBuf, legacy: PathBuf) -> Result<PathBuf> {
+    // Legacy wins even in mixed layouts: never silently orphan recovery state or
+    // redirect an existing installation's task/uninstall ownership.
+    if legacy.try_exists().context("inspect legacy arTerm directory")? {
+        ensure!(legacy.is_dir(), "legacy arTerm path is not a directory: {}", legacy.display());
+        return Ok(legacy);
+    }
+    if current.try_exists().context("inspect arTerm directory")? {
+        ensure!(current.is_dir(), "arTerm path is not a directory: {}", current.display());
+    }
+    Ok(current)
 }
 
 fn wide(value: &std::ffi::OsStr) -> Vec<u16> {
@@ -323,7 +338,7 @@ fn validate_dependency(path: &Path, role: Role) -> Result<PathBuf> {
     );
     let path = path.canonicalize()?;
     verify_signature(&path)?;
-    let output = Command::new(&path).arg("--help").output()?;
+    let output = dependency_help_command(&path, role).output()?;
     let help = String::from_utf8_lossy(&output.stdout);
     ensure!(
         output.status.success(),
@@ -340,6 +355,18 @@ fn validate_dependency(path: &Path, role: Role) -> Result<PathBuf> {
         );
     }
     Ok(path)
+}
+
+pub(crate) fn code_command(path: &Path) -> Command {
+    let mut command = Command::new(path);
+    command.arg("--disable-telemetry");
+    command
+}
+
+fn dependency_help_command(path: &Path, role: Role) -> Command {
+    let mut command = if role == Role::Host { code_command(path) } else { Command::new(path) };
+    command.arg("--help");
+    command
 }
 
 pub fn ensure_dependency(
@@ -775,8 +802,13 @@ fn resume_host_task(
 }
 
 pub fn installer_with_args(role: Role, payload: &[u8], args: &[String]) -> Result<()> {
+    if args.len() == 1 && matches!(args[0].to_ascii_lowercase().as_str(), "--privacy" | "/privacy") {
+        println!("{PRIVACY}");
+        return Ok(());
+    }
     if args.iter().any(|a| a == "--help" || a == "/?") {
         println!("{}", installer_help(role));
+        println!("{PRIVACY_NOTICE}");
         return Ok(());
     }
     let mut quiet = false;
@@ -814,6 +846,7 @@ pub fn installer_with_args(role: Role, payload: &[u8], args: &[String]) -> Resul
         if remove {
             return uninstall(&dir, role, terminate_sessions, force_stop);
         }
+        eprintln!("{PRIVACY_NOTICE}");
         if role == Role::Client {
             crate::client_config::initialize(&data_root()?, None, no_download || quiet)?;
         }
@@ -893,7 +926,7 @@ fn installer_help(role: Role) -> String {
     let client = if role == Role::Client {
         "\nClient installation initializes local files; no arterm setup is required. Use arterm login if not signed in, then arterm add to register a host."
     } else { "" };
-    format!("arTerm {} installer\n--quiet --no-download --log <absolute-path> --uninstall{host}\n\
+    format!("arTerm {} installer\n--quiet --no-download --log <absolute-path> --uninstall --privacy{host}\n\
         Both --option and /option spellings are accepted.\n\
         Existing configuration and credentials are retained.\n\
         Per-user installation. Signing credentials are not bundled. The installer never signs in.{client}",
@@ -903,6 +936,58 @@ fn installer_help(role: Role) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn privacy_defaults_preserve_legacy_and_mixed_directories() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("target")
+            .join(format!("privacy-paths-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&root).unwrap();
+        for suffix in ["", r"Programs\Client", r"Programs\Host"] {
+            let parent = root.join(suffix);
+            let current = parent.join("arTerm");
+            let legacy = parent.join("VsTerm");
+            assert_eq!(compatible_directory(current.clone(), legacy.clone()).unwrap(), current);
+            fs::create_dir_all(&current).unwrap();
+            assert_eq!(compatible_directory(current.clone(), legacy.clone()).unwrap(), current);
+            fs::create_dir_all(&legacy).unwrap();
+            fs::write(legacy.join("saved-state"), b"preserve").unwrap();
+            assert_eq!(compatible_directory(current.clone(), legacy.clone()).unwrap(), legacy);
+            fs::remove_dir(&current).unwrap();
+            assert_eq!(compatible_directory(current.clone(), legacy.clone()).unwrap(), legacy);
+            assert_eq!(fs::read(legacy.join("saved-state")).unwrap(), b"preserve");
+            fs::remove_dir_all(&legacy).unwrap();
+            fs::write(&legacy, b"not a directory").unwrap();
+            assert!(compatible_directory(current, legacy).is_err());
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn privacy_defaults_install_roles_reuse_their_own_legacy_directory() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("target")
+            .join(format!("privacy-installs-{}", uuid::Uuid::now_v7()));
+        for role in [Role::Client, Role::Host] {
+            let current = root.join("Programs").join("arTerm").join(role_name(role));
+            let legacy = root.join("Programs").join("VsTerm").join(role_name(role));
+            assert_eq!(install_dir_under(&root, role).unwrap(), current);
+            fs::create_dir_all(&current).unwrap();
+            assert_eq!(install_dir_under(&root, role).unwrap(), current);
+            fs::create_dir_all(&legacy).unwrap();
+            assert_eq!(install_dir_under(&root, role).unwrap(), legacy);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn privacy_defaults_code_probes_disable_telemetry_without_changing_devtunnel() {
+        let path = Path::new(r"C:\vendor.exe");
+        let args = |command: Command| command.get_args()
+            .map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        assert_eq!(args(dependency_help_command(path, Role::Host)), ["--disable-telemetry", "--help"]);
+        assert_eq!(args(dependency_help_command(path, Role::Client)), ["--help"]);
+        let mut version = code_command(path);
+        version.arg("--version");
+        assert_eq!(args(version), ["--disable-telemetry", "--version"]);
+    }
 
     #[test]
     fn enabled_schedule_survives_readiness_faults_and_later_recovery() {
