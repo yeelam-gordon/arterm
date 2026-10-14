@@ -287,6 +287,20 @@ and [trust removal](DEVELOPMENT-INSTALL.md). Ordinary `arterm-host stop` may res
 
 ## First-connection help
 
+Starting with 0.7.2, each client tunnel-startup attempt defaults to **60 seconds**.
+For a slower connection, choose a positive whole-second timeout:
+
+```powershell
+arterm doctor my-devbox --timeout 120s
+arterm connect my-devbox MyWork --timeout 120s
+```
+
+The budget covers authentication checks, tunnel discovery, published-port lookup
+and control-port readiness. It does not limit the shell's lifetime or replace
+the separate host-handshake and interactive sign-in recovery timeouts.
+Reconnect attempts and the printed recovery command preserve your override.
+Increasing the timeout does not fix denied access or an unavailable host.
+
 If discovery or sign-in fails, run `arterm doctor my-devbox`, check that both
 tunnels use the same GitHub account, and check permitted outbound access.
 Use `arterm --login` for explicit client authentication recovery. Keep saved

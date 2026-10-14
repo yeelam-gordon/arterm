@@ -15,7 +15,7 @@ use arterm::{
     engine::{End, Engine, SessionRejected},
     local_control::{self, Operation, Owner},
     store::{self, SessionReference, Store},
-    transport::{ensure_authenticated, login, Forward, LoginRequired, TunnelLink},
+    transport::{ensure_authenticated, login, Forward, LoginRequired, TunnelLink, DEFAULT_CONNECTION_TIMEOUT},
 };
 use std::{
     path::{Path, PathBuf},
@@ -32,8 +32,15 @@ struct ConnectionFlags {
     address: Option<String>,
     stdio: bool,
     retries: Option<u32>,
+    timeout: Option<Duration>,
     shell: Option<String>,
     cwd: Option<String>,
+}
+
+impl ConnectionFlags {
+    fn connection_timeout(&self) -> Duration {
+        self.timeout.unwrap_or(DEFAULT_CONNECTION_TIMEOUT)
+    }
 }
 
 fn usage() {
@@ -45,15 +52,15 @@ Usage:\n\
   arterm add ALIAS --tunnel NAME-OR-ID --host-path ABSOLUTE\n\
   arterm list [--json]\n\
   arterm remove ALIAS\n\
-  arterm connect ALIAS [REF] [--shell EXE] [--cwd PATH] [--retries 0..20]\n\
-  arterm list --client [--json] | list --server MACHINE [--json]\n\
+  arterm connect ALIAS [REF] [--shell EXE] [--cwd PATH] [--retries 0..20] [--timeout 60s]\n\
+  arterm list --client [--json] | list --server MACHINE [--json] [--timeout 60s]\n\
   arterm send MACHINE SESSION --command TEXT [--command-id UUID] [--timeout 60s] [--wait] [--json]\n\
   arterm send MACHINE SESSION --file LOCALPATH [--json]\n\
   arterm receive MACHINE SESSION --file ABSOLUTE-REMOTEPATH [--json]\n\
   arterm read MACHINE SESSION [--lines N | --command-id UUID] [--json]\n\
   arterm interrupt MACHINE SESSION [--json] | detach MACHINE SESSION [--json]\n\
-  arterm terminate MACHINE SESSION [--json]\n\
-  arterm doctor [ALIAS]\n\
+  arterm terminate MACHINE SESSION [--json] [--timeout 60s]\n\
+  arterm doctor [ALIAS [--timeout 60s]]\n\
   arterm --help | --version\n\n\
 Client Setup initializes local files. setup is optional repair/custom-path configuration, not sign-in.\n\
 Network commands renew positively missing/expired sign-in once; use arterm --login for interactive GitHub sign-in with the host's account.\n\
@@ -62,6 +69,8 @@ Offline, disconnected, and unconfirmed references are retained; remote existence
 Connecting a retired session name creates fresh identity/state; an old GUID never resolves to its replacement.\n\
 Use list --server MACHINE for current authorized remote inventory, including detached running sessions.\n\
 Without REF, connect only prints a reusable command. Names are not passwords.\n\
+Tunnel startup defaults to 60s per attempt; connect, doctor ALIAS, list --server and terminate accept --timeout in positive whole seconds (e.g. 120s).\n\
+This covers authentication checks, discovery and control-port readiness, not the session lifetime, host handshake or interactive sign-in recovery.\n\
 Control commands print readable results by default; use --json for structured automation output.\n\
 Commands require a compatible, command-enabled PowerShell session. Existing sessions are not retrofitted.\n\
 Send waits up to 30s for readiness by default; --timeout overrides it. --wait requires --timeout and shares its budget with completion.\n\
@@ -92,6 +101,17 @@ fn parse_connection_flags(args: &[String], allow_create: bool) -> Result<Connect
         match args[index].as_str() {
             "--address" => flags.address = Some(value(args, &mut index, "--address")?),
             "--stdio" => flags.stdio = true,
+            "--timeout" if flags.timeout.is_none() => {
+                let text = value(args, &mut index, "--timeout")?;
+                let seconds: u64 = text.strip_suffix('s')
+                    .context("connection timeout must be whole seconds, e.g. 60s")?
+                    .parse().context("invalid connection timeout")?;
+                ensure!(seconds > 0, "connection timeout must be positive");
+                let timeout = Duration::from_secs(seconds);
+                ensure!(std::time::Instant::now().checked_add(timeout).is_some(),
+                    "connection timeout exceeds supported clock range");
+                flags.timeout = Some(timeout);
+            }
             "--retries" => {
                 let retries: u32 = value(args, &mut index, "--retries")?
                     .parse()
@@ -114,6 +134,25 @@ fn parse_connection_flags(args: &[String], allow_create: bool) -> Result<Connect
         ensure!(endpoint.ip().is_loopback(), "--address must be loopback");
     }
     Ok(flags)
+}
+
+#[cfg(test)]
+#[test]
+fn connection_timeout_defaults_and_overrides_are_validated() {
+    assert_eq!(parse_connection_flags(&[], true).unwrap().connection_timeout(), Duration::from_secs(60));
+    let args = vec!["--timeout".into(), "120s".into()];
+    assert_eq!(parse_connection_flags(&args, true).unwrap().connection_timeout(), Duration::from_secs(120));
+    let (flags, json) = output_connection_flags(&["--json".into(), "--timeout".into(), "2s".into()]).unwrap();
+    assert!(json);
+    assert_eq!(flags.connection_timeout(), Duration::from_secs(2));
+    for value in ["0s", "-1s", "1.5s", "NaNs", "60", "1m", "18446744073709551615s"] {
+        let args = vec!["--timeout".into(), value.into()];
+        assert!(parse_connection_flags(&args, true).is_err(), "{value}");
+    }
+    assert!(parse_connection_flags(&["--timeout".into()], true).is_err());
+    assert!(parse_connection_flags(&[
+        "--timeout".into(), "60s".into(), "--timeout".into(), "120s".into(),
+    ], true).is_err());
 }
 
 fn devtunnel_path(config: &ClientConfig) -> Result<&Path> {
@@ -210,26 +249,27 @@ fn connect_link(
     config: &ClientConfig,
     target: &Target,
     address: Option<&str>,
+    timeout: Duration,
 ) -> Result<TunnelLink> {
     if let Some(address) = address {
         return TunnelLink::connect(address, &target.host_path, None);
     }
-    let (forward, address) = Forward::start(devtunnel_path(config)?, &target.tunnel_id)?;
+    let (forward, address) = Forward::start_with_timeout(devtunnel_path(config)?, &target.tunnel_id, timeout)?;
     TunnelLink::connect(&address, &target.host_path, Some(forward))
 }
 
-fn probe_retirement(config: &ClientConfig, target: &Target, address: Option<&str>,
+fn probe_retirement(config: &ClientConfig, target: &Target, address: Option<&str>, timeout: Duration,
     state: &store::State) -> Result<Option<store::RetirementReason>> {
     ensure!(state.origin.is_some(), "no saved broker identity; remote existence remains unknown");
-    let mut link = connect_link(config, target, address)?;
+    let mut link = connect_link(config, target, address, timeout)?;
     client_protocol::retirement_from_inventory(&mut link, state)
 }
 
-fn terminate_remote(config: &ClientConfig, target: &Target, address: Option<&str>,
+fn terminate_remote(config: &ClientConfig, target: &Target, address: Option<&str>, timeout: Duration,
     state: &store::State) -> Result<client_protocol::Termination> {
     if state.token.is_none() {
         if state.ended {
-            if let Ok(Some(reason)) = probe_retirement(config, target, address, state) {
+            if let Ok(Some(reason)) = probe_retirement(config, target, address, timeout, state) {
                 return Ok(client_protocol::Termination::Retired(reason));
             }
         }
@@ -237,11 +277,11 @@ fn terminate_remote(config: &ClientConfig, target: &Target, address: Option<&str
     }
     ensure!(state.origin.is_some(), "no saved broker identity; reference retained");
     let outcome = {
-        let mut link = connect_link(config, target, address)?;
+        let mut link = connect_link(config, target, address, timeout)?;
         client_protocol::terminate(&mut link, state)?
     };
     if outcome != client_protocol::Termination::Rejected { return Ok(outcome); }
-    match probe_retirement(config, target, address, state) {
+    match probe_retirement(config, target, address, timeout, state) {
         Ok(Some(reason)) => Ok(client_protocol::Termination::Retired(reason)),
         _ => bail!("saved session credential rejected; remote existence remains unconfirmed and reference was retained"),
     }
@@ -326,6 +366,9 @@ fn session_command(alias: &str, reference: &SessionReference, retries: u32, flag
     if flags.stdio {
         parts.push("--stdio".into());
     }
+    if let Some(timeout) = flags.timeout {
+        parts.extend(["--timeout".into(), format!("{}s", timeout.as_secs())]);
+    }
     if let Some(shell) = &flags.shell {
         parts.extend(["--shell".into(), quote_command_arg(shell)]);
     }
@@ -364,12 +407,13 @@ fn run_session(
     let config = client_config::load(root)?;
     let target = client_config::target(&config, alias)?.clone();
     let retries = flags.retries.unwrap_or(DEFAULT_RETRIES);
+    let timeout = flags.connection_timeout();
     let state_dir = client_config::state_dir(root, &target);
     let (store, state) = match Store::resolve(&state_dir, &target.target_id, reference, create, flags.shell.as_deref(), flags.cwd.as_deref()) {
         Ok(resolved) => resolved,
         Err(error) if error.is::<store::RecoveryBlocked>() => {
             let (store, state) = Store::resolve_for_management(&state_dir, &target.target_id, reference)?;
-            if let Ok(Some(reason)) = probe_retirement(&config, &target, flags.address.as_deref(), &state) {
+            if let Ok(Some(reason)) = probe_retirement(&config, &target, flags.address.as_deref(), timeout, &state) {
                 store.retire(&target.target_id, state.id, reason)?;
                 return Err(store::RetiredSession { id: state.id, reason }.into());
             }
@@ -411,12 +455,12 @@ fn run_session(
         if matches!(action, Operation::FileSend { .. } | Operation::FileReceive { .. }) {
             let ticket = admission.ticket().context("file transfer unsupported or attachment unavailable")?;
             let mut files = files.try_lock().map_err(|_| anyhow::anyhow!("another file operation is active"))?;
-            let mut link = connect_link(&service_config, &service_target, service_address.as_deref())?;
+            let mut link = connect_link(&service_config, &service_target, service_address.as_deref(), timeout)?;
             return file_protocol::transfer(&mut link, &state, &mut files, &ticket, operation_id, action, check);
         }
         ensure!(matches!(action, Operation::Terminate), "invalid management operation");
         check()?;
-        let outcome = terminate_remote(&service_config, &service_target, service_address.as_deref(), &state)?;
+        let outcome = terminate_remote(&service_config, &service_target, service_address.as_deref(), timeout, &state)?;
         admission.revoke();
         let mut snapshot = service_snapshot.lock().unwrap();
         let response = termination_response(&mut snapshot, outcome)?;
@@ -440,7 +484,7 @@ fn run_session(
                     thread::sleep(Duration::from_millis(25));
                 }
             }
-            let mut link = match connect_link(&config, &target, flags.address.as_deref()) {
+            let mut link = match connect_link(&config, &target, flags.address.as_deref(), timeout) {
                 Ok(link) => link,
                 Err(error) => {
                     eprintln!("[session] Connection failed: {error:#}");
@@ -463,7 +507,7 @@ fn run_session(
             let end = match end {
                 Ok(end) => end,
                 Err(error) if error.is::<SessionRejected>() => {
-                    if let Ok(Some(reason)) = probe_retirement(&config, &target, flags.address.as_deref(), &engine.state) {
+                    if let Ok(Some(reason)) = probe_retirement(&config, &target, flags.address.as_deref(), timeout, &engine.state) {
                         store.retire(&target.target_id, id, reason)?;
                         return Err(store::RetiredSession { id, reason }.into());
                     }
@@ -530,7 +574,7 @@ fn terminate_session(root: &Path, args: &[String]) -> Result<u32> {
             return Err(error);
         }
     };
-    let outcome = terminate_remote(&config, &target, flags.address.as_deref(), &state)?;
+    let outcome = terminate_remote(&config, &target, flags.address.as_deref(), flags.connection_timeout(), &state)?;
     let response = termination_response(&mut state, outcome)?;
     store.save(&state)?;
     println!("{}", client_output::result(&response, alias, reference.as_str(), json)?);
@@ -547,7 +591,7 @@ fn output_connection_flags(args: &[String]) -> Result<(ConnectionFlags, bool)> {
             json = true;
         } else {
             options.push(args[index].clone());
-            if matches!(args[index].as_str(), "--address" | "--retries") {
+            if matches!(args[index].as_str(), "--address" | "--retries" | "--timeout") {
                 let flag = args[index].clone();
                 options.push(value(args, &mut index, &flag)?);
             }
@@ -562,6 +606,7 @@ fn doctor(root: &Path, args: &[String]) -> Result<()> {
     let start = usize::from(alias.is_some());
     let flags = parse_connection_flags(&args[start..], false)?;
     ensure!(flags.retries.is_none(), "doctor does not accept --retries");
+    ensure!(flags.timeout.is_none() || alias.is_some(), "--timeout requires doctor ALIAS");
     ensure!(
         flags.address.is_none() || alias.is_some(),
         "--address requires doctor ALIAS"
@@ -585,7 +630,7 @@ fn doctor(root: &Path, args: &[String]) -> Result<()> {
         println!("Dependency and authentication are ready.");
     }
     if let Some((alias, target)) = target {
-        let mut link = connect_link(&config, target, flags.address.as_deref())?;
+        let mut link = connect_link(&config, target, flags.address.as_deref(), flags.connection_timeout())?;
         client_protocol::doctor(&mut link)?;
         println!("Tunnel and host handshake succeeded for {alias}.");
     }
@@ -759,7 +804,7 @@ fn command(args: &[String]) -> Result<u32> {
             ensure!(flags.retries.is_none() && !flags.stdio, "invalid server inventory options");
             let config = client_config::load(&root)?;
             let target = client_config::target(&config, machine)?;
-            let mut link = connect_link(&config, target, flags.address.as_deref())?;
+            let mut link = connect_link(&config, target, flags.address.as_deref(), flags.connection_timeout())?;
             let mut inventory = client_protocol::list_sessions(&mut link)?;
             let dir = client_config::state_dir(&root, target);
             let mut labels = std::collections::BTreeMap::new();

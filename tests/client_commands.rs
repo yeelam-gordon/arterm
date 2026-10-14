@@ -166,6 +166,7 @@ fn help_version_and_validation_do_not_require_setup() {
     assert!(!help.contains("--saved"));
     assert!(help.contains("without network or sign-in") && help.contains("proven nonresumable"));
     assert!(help.contains("--file") && help.contains("arterm receive"));
+    assert!(help.contains("Tunnel startup defaults to 60s per attempt"));
     assert!(!help.contains("--unblock") && help.contains("automatically unblocked") && help.contains("not a malware scan"));
     assert!(run(&home, &["--version"]).status.success());
     assert!(!run(
@@ -187,6 +188,7 @@ fn help_version_and_validation_do_not_require_setup() {
         vec!["list", "--saved", "--json"],
         vec!["list", "--json", "--saved"],
         vec!["resume", "work", "session"],
+        vec!["doctor", "--timeout", "60s"],
         vec!["send", "work", "session"],
         vec!["send", "work", "session", "--command", "x", "--file", "x"],
         vec!["send", "work", "session", "--command", "x", "--wait"],
@@ -197,6 +199,20 @@ fn help_version_and_validation_do_not_require_setup() {
         vec!["detach", "work", "session", "--target", "work"],
     ] {
         assert!(!run(&home, &args).status.success(), "{args:?}");
+    }
+    for verb in [
+        vec!["connect", "work"],
+        vec!["doctor", "work"],
+        vec!["list", "--server", "work"],
+        vec!["terminate", "work", "session"],
+    ] {
+        for value in ["0s", "-1s", "1.5s", "60", "18446744073709551615s"] {
+            let mut args = verb.clone();
+            args.extend(["--timeout", value]);
+            let output = run(&home, &args);
+            assert!(!output.status.success(), "{args:?}");
+            assert!(String::from_utf8_lossy(&output.stderr).contains("timeout"), "{args:?}");
+        }
     }
 
     assert!(!home.exists(), "invalid CLI must not create local state");
@@ -395,7 +411,7 @@ fn no_reference_only_prints_a_powershell_safe_command_and_preserves_flags() {
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap().to_string();
     let output = run(&home, &["connect", "work", "--shell", "C:\\Tools\\It's PS.exe",
-        "--cwd", "C:\\My Work", "--address", &address, "--stdio", "--retries", "0"]);
+        "--cwd", "C:\\My Work", "--address", &address, "--stdio", "--retries", "0", "--timeout", "120s"]);
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.contains("connect 'work' "));
@@ -404,6 +420,7 @@ fn no_reference_only_prints_a_powershell_safe_command_and_preserves_flags() {
     assert!(text.contains(&format!("--address '{address}'")));
     assert!(text.contains("--stdio"));
     assert!(text.contains("--retries 0"));
+    assert!(text.contains("--timeout 120s"));
     assert_eq!(text.lines().count(), 1);
     assert!(listener.accept().is_err());
     assert!(!home.exists(), "print-only must not write state or history");

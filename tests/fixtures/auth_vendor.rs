@@ -87,7 +87,16 @@ fn main() {
     }
     if args.first().map(String::as_str) == Some("connect") {
         log("connect");
+        if mode == "forward_stall" {
+            thread::sleep(Duration::from_secs(90));
+            return;
+        }
         if mode == "forward_success" {
+            let delay = root.join("forward-delay-ms");
+            if delay.exists() {
+                let milliseconds = fs::read_to_string(delay).unwrap().parse().unwrap();
+                thread::sleep(Duration::from_millis(milliseconds));
+            }
             let address = fs::read_to_string(root.join("address")).unwrap();
             println!("Forwarding from {address} to host port 31545");
             std::io::stdout().flush().unwrap();

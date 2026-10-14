@@ -331,7 +331,22 @@ default registration route.
 
 `arterm doctor my-devbox` checks discovery and reachability. The host's
 `code tunnel` and the client's `devtunnel connect` are two ends of the same
-transport. Starting with 0.7.0, the client attempts a bounded
+transport. Starting with 0.7.2, client tunnel startup defaults to 60 seconds
+per attempt (previously 40). `connect`, `doctor ALIAS`, `list --server MACHINE`
+and `terminate MACHINE SESSION` accept `--timeout 120s` to override it with
+positive whole seconds. Zero, fractional, missing, duplicate and unsupported
+clock-range values are rejected before connecting. The startup budget covers
+authentication checks, discovery, port lookup and control-port readiness.
+Each reconnect and post-authentication retry receives the same budget; printed
+connect/recovery commands retain the explicit override.
+
+The override does not change the host handshake, session lifetime or interactive
+sign-in recovery limits. An attached client's auxiliary connections use that
+client's `connect --timeout` setting; `terminate --timeout` applies when no local
+connection owner handles the request. The existing `send --timeout` remains a
+separate command-readiness/completion budget, not a connection option.
+
+Starting with 0.7.0, the client attempts a bounded
 `devtunnel user login --github` under the current Windows user when credentials
 are confirmed missing or expired, then checks authentication again before
 continuing. Valid sign-in is left unchanged. Concurrent client operations

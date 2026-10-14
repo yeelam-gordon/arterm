@@ -35,6 +35,7 @@ use windows_sys::Win32::{
 };
 
 pub const BRIDGE_ARGS: &[&str] = &["bridge", "--protocol", "vsterm-session-v1"];
+pub const DEFAULT_CONNECTION_TIMEOUT: Duration = Duration::from_secs(60);
 const SPAWN: u64 = 10;
 pub enum Poll {
     Message(Value),
@@ -164,16 +165,23 @@ impl std::error::Error for AuthenticationRejected {}
 
 impl Forward {
     pub fn start(devtunnel: &Path, tunnel_id: &str) -> Result<(Self, String)> {
+        Self::start_with_timeout(devtunnel, tunnel_id, DEFAULT_CONNECTION_TIMEOUT)
+    }
+
+    pub fn start_with_timeout(
+        devtunnel: &Path, tunnel_id: &str, timeout: Duration,
+    ) -> Result<(Self, String)> {
+        ensure!(!timeout.is_zero(), "connection timeout must be positive");
         let failure = authentication_object(true);
-        match Self::start_once(devtunnel, tunnel_id) {
+        match Self::start_once(devtunnel, tunnel_id, timeout) {
             Err(error) if error.is::<LoginRequired>() => {
                 AUTHENTICATION.recover(devtunnel, &failure)?;
-                Self::retry_after_authentication(devtunnel, tunnel_id, &failure)
+                Self::retry_after_authentication(devtunnel, tunnel_id, timeout, &failure)
             }
             Err(error) if error.is::<AuthenticationRejected>() => {
                 if !authenticated(devtunnel)? {
                     AUTHENTICATION.recover(devtunnel, &failure)?;
-                    Self::retry_after_authentication(devtunnel, tunnel_id, &failure)
+                    Self::retry_after_authentication(devtunnel, tunnel_id, timeout, &failure)
                 } else {
                     Err(LoginRequired.into_error(error))
                 }
@@ -183,9 +191,9 @@ impl Forward {
     }
 
     fn retry_after_authentication(
-        devtunnel: &Path, tunnel_id: &str, failure: &Result<OwnedHandle>,
+        devtunnel: &Path, tunnel_id: &str, timeout: Duration, failure: &Result<OwnedHandle>,
     ) -> Result<(Self, String)> {
-        Self::start_once(devtunnel, tunnel_id).map_err(|error| {
+        Self::start_once(devtunnel, tunnel_id, timeout).map_err(|error| {
             let error = if error.is::<AuthenticationRejected>() {
                 LoginRequired.into_error(error)
             } else {
@@ -200,8 +208,9 @@ impl Forward {
         })
     }
 
-    fn start_once(devtunnel: &Path, tunnel_id: &str) -> Result<(Self, String)> {
-        let deadline = Instant::now() + Duration::from_secs(40);
+    fn start_once(devtunnel: &Path, tunnel_id: &str, timeout: Duration) -> Result<(Self, String)> {
+        let deadline = Instant::now().checked_add(timeout)
+            .context("connection timeout exceeds supported clock range")?;
         if !authenticated_until(devtunnel, deadline)? {
             return Err(LoginRequired.into());
         }
@@ -283,7 +292,8 @@ impl Forward {
                 }
             }
         }
-        bail!("devtunnel did not expose a compatible control port within 40 seconds; {} candidate(s) examined", probe_errors.len())
+        bail!("devtunnel did not expose a compatible control port within {} seconds; {} candidate(s) examined",
+            timeout.as_secs_f64(), probe_errors.len())
     }
 }
 impl Drop for Forward {
@@ -1143,6 +1153,18 @@ impl Drop for TunnelLink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connection_timeout_defaults_to_sixty_seconds_and_rejects_invalid_budgets() {
+        assert_eq!(DEFAULT_CONNECTION_TIMEOUT, Duration::from_secs(60));
+        for timeout in [Duration::ZERO, Duration::MAX] {
+            let error = match Forward::start_with_timeout(Path::new("missing-vendor.exe"), "fixture", timeout) {
+                Ok(_) => panic!("invalid timeout must not start forwarding"),
+                Err(error) => error,
+            };
+            assert!(error.to_string().contains("connection timeout"), "{error:#}");
+        }
+    }
 
     #[test]
     fn forwarding_announcement_does_not_trigger_an_immediate_probe() {
