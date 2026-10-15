@@ -47,16 +47,10 @@ No unsupported devtunnel telemetry-off flag is implied.
 
 ## Where data lives
 
-On each Windows machine, the default data root is `%LOCALAPPDATA%\arTerm`.
-If `%LOCALAPPDATA%\VsTerm` already exists it is reused, even when both roots
-exist. `VSTERM_REMOTE_HOME` explicitly overrides the root. No automatic move,
-merge, deletion or import from `DevBoxRemote` occurs. These legacy names are
-intentional compatibility contracts to avoid orphaning existing sessions.
+For a fresh installation, the default data root on each Windows machine is
+`%LOCALAPPDATA%\arTerm`. `VSTERM_REMOTE_HOME` explicitly overrides the root.
 
 New installed binaries use `%LOCALAPPDATA%\Programs\arTerm\Client` or `Host`.
-An existing `%LOCALAPPDATA%\Programs\VsTerm\Client` or `Host` is reused for that
-role, including mixed layouts. Compatibility EXE aliases, registry/task
-ownership, pipe/protocol identities and encryption domains remain unchanged.
 Windows Apps displays **arTerm Client** / **arTerm Host**.
 
 ## Client data
@@ -135,8 +129,8 @@ Before deletion, finish/terminate sessions and stop/disable the owned host task;
 close clients. Deleting recovery records can permanently prevent reconnection.
 After uninstall, you can remove your selected data root and unwanted retained
 files, including any separately configured log/history/transfer locations.
-Inspect both roots in mixed layouts; do not delete unrelated data or another
-installation's files. Use vendor sign-out/revocation controls separately for
+Do not delete unrelated data or another installation's files.
+Use vendor sign-out/revocation controls separately for
 devtunnel, VS Code tunnel and GitHub. Local deletion does not erase backups,
 remote copies, third-party logs, or revoke issued credentials.
 
