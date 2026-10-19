@@ -155,8 +155,8 @@ impl Bridge {
                 ("client_instance_id", Value::Binary(client.to_vec())),
                 ("correlation_id", Value::Binary(vec![8; 16])),
                 ("capabilities", Value::Array(if commands {
-                    vec![s("client-session-id"), s(arterm::shell_integration::CAPABILITY)]
-                } else { vec![s("client-session-id")] })),
+                    vec![s("owner-authorized-resume-v1"), s("client-session-id"), s(arterm::shell_integration::CAPABILITY)]
+                } else { vec![s("owner-authorized-resume-v1"), s("client-session-id")] })),
                 ("max_receive_frame", (wire::MAX_FRAME as u64).into()),
             ]),
         ));
@@ -268,13 +268,12 @@ fn pid_markers_survive_terminal_wrapping_and_style_records() {
     assert_eq!(marker_pid("SECOND=12\r\n345:resumable", "SECOND="), "12345");
     assert_eq!(find_marker_pid("FIRST=$PID:resumable", "FIRST="), None);
 }
-fn create_message(request: Uuid, id: Uuid, claim: &[u8], broker: &[u8]) -> Value {
+fn create_message(request: Uuid, id: Uuid, broker: &[u8]) -> Value {
     message(
         "CreateSession",
         map(vec![
             ("request_id", Value::Binary(request.as_bytes().to_vec())),
             ("requested_session_id", s(&id.to_string())),
-            ("create_claim", Value::Binary(claim.to_vec())),
             ("origin_broker_instance_id", Value::Binary(broker.to_vec())),
             ("connection_epoch", 1.into()),
             ("shell", s(&std::env::var("ARTERM_TEST_SHELL").unwrap_or_else(|_| "powershell.exe".into()))),
@@ -296,7 +295,7 @@ fn file_authorization_rejects_wrong_session_lease_epoch_and_revoked_writer() {
         bridge.send(message("Hello", map(vec![
             ("min_version", 1.into()), ("max_version", 1.into()),
             ("client_instance_id", Value::Binary(client.to_vec())),
-            ("capabilities", Value::Array(vec![s(arterm::transfer_admission::CAPABILITY),
+            ("capabilities", Value::Array(vec![s("owner-authorized-resume-v1"), s(arterm::transfer_admission::CAPABILITY),
                 s(arterm::transfer_payload::METADATA_CAPABILITY),
                 s(arterm::recipient_metadata::CAPABILITY)])),
         ])));
@@ -312,15 +311,14 @@ fn file_authorization_rejects_wrong_session_lease_epoch_and_revoked_writer() {
     let mut writer = host.bridge();
     let broker = writer.hello(&client);
     let session = Uuid::now_v7();
-    writer.send(create_message(Uuid::now_v7(), session, &[7; 32], &broker));
+    writer.send(create_message(Uuid::now_v7(), session, &broker));
     let created = writer.recv();
     let body = get(&created, "body").unwrap();
-    let token = binary(body, "resume_token").unwrap();
+    assert!(get(body, "resume_token").is_err());
     let attachment = binary(body, "attachment_id").unwrap();
     let lease = binary(body, "lease_id").unwrap();
     let auth = || vec![
         ("session_id", s(&session.to_string())),
-        ("resume_token", Value::Binary(token.clone())),
         ("broker_instance_id", Value::Binary(broker.clone())),
         ("attachment_id", Value::Binary(attachment.clone())),
         ("lease_id", Value::Binary(lease.clone())),
@@ -329,7 +327,6 @@ fn file_authorization_rejects_wrong_session_lease_epoch_and_revoked_writer() {
     ];
     for (key, invalid) in [
         ("session_id", s(&Uuid::now_v7().to_string())),
-        ("resume_token", Value::Binary(vec![0; 32])),
         ("attachment_id", Value::Binary(vec![0; 16])),
         ("lease_id", Value::Binary(vec![0; 16])),
         ("client_instance_id", Value::Binary(vec![0; 16])),
@@ -395,7 +392,7 @@ fn command_protocol_rejects_unintegrated_shell_before_input() {
     let client = vec![21; 16];
     let broker = bridge.hello_capabilities(&client, true);
     let session = Uuid::now_v7();
-    bridge.send(create_message(Uuid::now_v7(), session, &[3; 32], &broker));
+    bridge.send(create_message(Uuid::now_v7(), session, &broker));
     let created = bridge.recv();
     let body = get(&created, "body").unwrap();
     let attachment = binary(body, "attachment_id").unwrap();
@@ -431,7 +428,7 @@ fn managed_commands_preserve_runspace_and_report_real_completion() {
     let client = vec![17; 16];
     let broker = bridge.hello_capabilities(&client, true);
     let session = Uuid::now_v7();
-    let mut create = create_message(Uuid::now_v7(), session, &[9; 32], &broker);
+    let mut create = create_message(Uuid::now_v7(), session, &broker);
     if let Value::Map(fields) = &mut create {
         let body = &mut fields.iter_mut().find(|(key, _)| key.as_str() == Some("body")).unwrap().1;
         if let Value::Map(fields) = body { fields.push((s("command_execution"), true.into())); }
@@ -442,7 +439,7 @@ fn managed_commands_preserve_runspace_and_report_real_completion() {
     let created = get(&created, "body").unwrap();
     let attachment = binary(created, "attachment_id").unwrap();
     let lease = binary(created, "lease_id").unwrap();
-    let token = binary(created, "resume_token").unwrap();
+    assert!(get(created, "resume_token").is_err());
     receive_command_state(&mut bridge, None, "ready");
     let submit = |id: Uuid, command: &str| writer_message(session, &attachment, &lease, &client,
         "CommandSubmit", vec![("connection_epoch", 1.into()), ("command_id", s(&id.to_string())), ("command", s(command))]);
@@ -526,7 +523,7 @@ fn managed_commands_preserve_runspace_and_report_real_completion() {
     thread::sleep(Duration::from_millis(1500));
     let mut bridge = host.bridge();
     bridge.hello_capabilities(&client, true);
-    bridge.send(attach_message(session, &token, &client, 2));
+    bridge.send(attach_message(session, &client, 2));
     let attachment_reply = bridge.recv();
     assert_eq!(text(&attachment_reply, "type").unwrap(), "SessionAttached");
     let body = get(&attachment_reply, "body").unwrap();
@@ -568,15 +565,14 @@ fn real_conpty_survives_bridge_loss_and_duplicate_create() {
     let id = Uuid::now_v7();
     let request = Uuid::now_v7();
     let client = Uuid::now_v7().as_bytes().to_vec();
-    let claim = vec![7; 32];
     let mut first = host.bridge();
     let broker = first.hello(&client);
-    first.send(create_message(request, id, &claim, &broker));
+    first.send(create_message(request, id, &broker));
     let created = first.recv();
     assert_eq!(text(&created, "type").unwrap(), "SessionCreated");
     let body = get(&created, "body").unwrap();
     assert_eq!(get(body, "requires_attach").unwrap().as_bool(), Some(false));
-    let token = binary(body, "resume_token").unwrap();
+    assert!(get(body, "resume_token").is_err());
     let attachment = binary(body, "attachment_id").unwrap();
     let lease = binary(body, "lease_id").unwrap();
     first.send(writer_message(id,&attachment,&lease,&client,"Input",vec![("input_seq",1.into()),("bytes",Value::Binary(b"$global:KeepMe='resumable'; Write-Output ('FIRST=' + $PID + ':' + $global:KeepMe)\r\n".to_vec()))]));
@@ -590,7 +586,7 @@ fn real_conpty_survives_bridge_loss_and_duplicate_create() {
     thread::sleep(Duration::from_millis(150));
     let mut second = host.bridge();
     assert_eq!(second.hello(&client), broker);
-    second.send(create_message(request, id, &claim, &broker));
+    second.send(create_message(request, id, &broker));
     let recovered = second.recv();
     assert_eq!(text(&recovered, "type").unwrap(), "SessionCreated");
     let recovered_body = get(&recovered, "body").unwrap();
@@ -602,12 +598,11 @@ fn real_conpty_survives_bridge_loss_and_duplicate_create() {
         get(recovered_body, "requires_attach").unwrap().as_bool(),
         Some(true)
     );
-    assert_eq!(binary(recovered_body, "resume_token").unwrap(), token);
+    assert!(get(recovered_body, "resume_token").is_err());
     second.send(message(
         "AttachSession",
         map(vec![
             ("session_id", s(&id.to_string())),
-            ("resume_token", Value::Binary(token.clone())),
             ("mode", s("writer")),
             ("takeover", false.into()),
             ("after_output_seq", cursor.into()),
@@ -664,7 +659,6 @@ fn real_conpty_survives_bridge_loss_and_duplicate_create() {
         "TerminateSession",
         map(vec![
             ("session_id", s(&id.to_string())),
-            ("resume_token", Value::Binary(token)),
             ("grace_ms", 5000.into()),
             ("reason", s("explicit")),
         ]),
@@ -694,12 +688,11 @@ fn real_conpty_survives_bridge_loss_and_duplicate_create() {
     assert!(host.command(&["stop"]).status.success());
 }
 
-fn attach_message(id: Uuid, token: &[u8], client: &[u8], epoch: u64) -> Value {
+fn attach_message(id: Uuid, client: &[u8], epoch: u64) -> Value {
     message(
         "AttachSession",
         map(vec![
             ("session_id", s(&id.to_string())),
-            ("resume_token", Value::Binary(token.to_vec())),
             ("mode", s("writer")),
             ("takeover", false.into()),
             ("after_output_seq", 0.into()),
@@ -713,12 +706,105 @@ fn attach_message(id: Uuid, token: &[u8], client: &[u8], epoch: u64) -> Value {
 }
 
 #[test]
+fn owner_clients_keep_independent_replay_guards_across_handoffs() {
+    let host = Host::start();
+    let id = Uuid::now_v7();
+    let a = Uuid::now_v7().as_bytes().to_vec();
+    let b = Uuid::now_v7().as_bytes().to_vec();
+    let mut first = host.bridge();
+    let broker = first.hello(&a);
+    first.send(create_message(Uuid::now_v7(), id, &broker));
+    let created = first.recv();
+    let body = get(&created, "body").unwrap();
+    let attachment = binary(body, "attachment_id").unwrap();
+    let lease = binary(body, "lease_id").unwrap();
+    first.send(writer_message(id, &attachment, &lease, &a, "Input", vec![
+        ("input_seq", 1.into()), ("bytes", Value::Binary(b"$global:ReplayCount=1; Write-Output 'REPLAY_A_READY'\r\n".to_vec()))]));
+    let mut cursor = 0;
+    collect_marker(&mut first, id, &mut cursor, "REPLAY_A_READY");
+    first.close_input();
+    drop(first);
+    thread::sleep(Duration::from_millis(150));
+    let mut second = host.bridge();
+    second.hello(&b);
+    second.send(attach_message(id, &b, 1));
+    let attached = second.recv();
+    assert_eq!(text(&attached, "type").unwrap(), "SessionAttached");
+    let body = get(&attached, "body").unwrap();
+    assert_eq!(num(body, "input_committed_through").unwrap(), 0);
+    let attachment = binary(body, "attachment_id").unwrap();
+    let lease = binary(body, "lease_id").unwrap();
+    let input = writer_message(id, &attachment, &lease, &b, "Input", vec![
+        ("input_seq", 1.into()), ("bytes", Value::Binary(b"$global:ReplayCount++; Write-Output 'REPLAY_B_READY'\r\n".to_vec()))]);
+    second.send(input.clone());
+    second.send(input);
+    second.send(writer_message(id, &attachment, &lease, &b, "Input", vec![
+        ("input_seq", 2.into()), ("bytes", Value::Binary(b"Write-Output ('REPLAY_B_COUNT=' + $global:ReplayCount)\r\n".to_vec()))]));
+    collect_marker(&mut second, id, &mut cursor, "REPLAY_B_COUNT=2");
+    second.close_input();
+    drop(second);
+    thread::sleep(Duration::from_millis(150));
+    let mut returning = host.bridge();
+    returning.hello(&a);
+    returning.send(attach_message(id, &a, 2));
+    let attached = returning.recv();
+    let body = get(&attached, "body").unwrap();
+    assert_eq!(num(body, "input_committed_through").unwrap(), 1);
+    let attachment = binary(body, "attachment_id").unwrap();
+    let lease = binary(body, "lease_id").unwrap();
+    returning.send(writer_message(id, &attachment, &lease, &a, "Input", vec![
+        ("input_seq", 1.into()), ("bytes", Value::Binary(b"$global:ReplayCount=99\r\n".to_vec()))]));
+    returning.send(writer_message(id, &attachment, &lease, &a, "Input", vec![
+        ("input_seq", 2.into()), ("bytes", Value::Binary(b"Write-Output ('REPLAY_A_COUNT=' + $global:ReplayCount)\r\n".to_vec()))]));
+    collect_marker(&mut returning, id, &mut cursor, "REPLAY_A_COUNT=2");
+}
+
+#[test]
+fn host_alias_collision_and_old_client_fail_before_replacement() {
+    let host = Host::start();
+    let mut old = host.bridge();
+    old.send(message("Hello", map(vec![
+        ("min_version", 1.into()), ("max_version", 1.into()),
+        ("client_instance_id", Value::Binary(vec![4;16])),
+        ("capabilities", Value::Array(vec![s("session-resume")])),
+    ])));
+    let rejected = old.recv();
+    assert_eq!(text(&rejected, "type").unwrap(), "Error");
+    assert_eq!(text(get(&rejected, "body").unwrap(), "code").unwrap(), "OwnerResumeCapabilityRequired");
+
+    let mut first = host.bridge();
+    let broker = first.hello(&[5;16]);
+    let id = Uuid::now_v7();
+    let mut creation = create_message(Uuid::now_v7(), id, &broker);
+    if let Value::Map(frame) = &mut creation {
+        let body = &mut frame.iter_mut().find(|(key, _)| key.as_str() == Some("body")).unwrap().1;
+        if let Value::Map(body) = body { body.push((s("session_alias"), s("canonical"))); }
+    }
+    first.send(creation);
+    assert_eq!(text(&first.recv(), "type").unwrap(), "SessionCreated");
+    let mut second = host.bridge();
+    second.hello(&[6;16]);
+    let mut creation = create_message(Uuid::now_v7(), Uuid::now_v7(), &broker);
+    if let Value::Map(frame) = &mut creation {
+        let body = &mut frame.iter_mut().find(|(key, _)| key.as_str() == Some("body")).unwrap().1;
+        if let Value::Map(body) = body { body.push((s("session_alias"), s("canonical"))); }
+    }
+    second.send(creation);
+    let rejected = second.recv();
+    assert_eq!(text(get(&rejected, "body").unwrap(), "code").unwrap(), "SessionAliasConflict");
+    second.send(message("ResolveSession", map(vec![("reference", s("CANONICAL"))])));
+    let resolved = second.recv();
+    assert_eq!(text(get(&resolved, "body").unwrap(), "session_id").unwrap(), id.to_string());
+    let sessions = host.command(&["sessions", "--json"]);
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&sessions.stdout).unwrap().as_array().unwrap().len(), 1);
+}
+
+#[test]
 fn concurrent_identical_create_requests_spawn_one_session() {
     let host = Host::start();
     let id = Uuid::now_v7();
     let request = Uuid::now_v7();
     let client = Uuid::now_v7().as_bytes().to_vec();
-    let claim = vec![11; 32];
     let mut first = host.bridge();
     let broker = first.hello(&client);
     let mut second = host.bridge();
@@ -734,12 +820,12 @@ fn concurrent_identical_create_requests_spawn_one_session() {
     let first_run = run(
         first,
         barrier.clone(),
-        create_message(request, id, &claim, &broker),
+        create_message(request, id, &broker),
     );
     let second_run = run(
         second,
         barrier.clone(),
-        create_message(request, id, &claim, &broker),
+        create_message(request, id, &broker),
     );
     barrier.wait();
     let responses = [first_run.join().unwrap(), second_run.join().unwrap()];
@@ -763,7 +849,7 @@ fn concurrent_identical_create_requests_spawn_one_session() {
     assert_eq!(sessions[0]["id"], id.to_string());
     let mut retry = host.bridge();
     assert_eq!(retry.hello(&client), broker);
-    retry.send(create_message(request, id, &claim, &broker));
+    retry.send(create_message(request, id, &broker));
     let retry_response = retry.recv();
     assert_eq!(
         get(get(&retry_response, "body").unwrap(), "recovered")
@@ -785,13 +871,12 @@ fn detached_session_rejects_connection_epoch_rollback() {
     let id = Uuid::now_v7();
     let request = Uuid::now_v7();
     let client = Uuid::now_v7().as_bytes().to_vec();
-    let claim = vec![12; 32];
     let mut created_link = host.bridge();
     let broker = created_link.hello(&client);
-    created_link.send(create_message(request, id, &claim, &broker));
+    created_link.send(create_message(request, id, &broker));
     let created = created_link.recv();
     let body = get(&created, "body").unwrap();
-    let token = binary(body, "resume_token").unwrap();
+    assert!(get(body, "resume_token").is_err());
     let attachment = binary(body, "attachment_id").unwrap();
     created_link.send(message(
         "Detach",
@@ -806,7 +891,7 @@ fn detached_session_rejects_connection_epoch_rollback() {
     drop(created_link);
     let mut newer = host.bridge();
     assert_eq!(newer.hello(&client), broker);
-    newer.send(attach_message(id, &token, &client, 2));
+    newer.send(attach_message(id, &client, 2));
     let attached = newer.recv();
     assert_eq!(text(&attached, "type").unwrap(), "SessionAttached");
     let attachment = binary(get(&attached, "body").unwrap(), "attachment_id").unwrap();
@@ -823,7 +908,7 @@ fn detached_session_rejects_connection_epoch_rollback() {
     drop(newer);
     let mut stale = host.bridge();
     assert_eq!(stale.hello(&client), broker);
-    stale.send(attach_message(id, &token, &client, 1));
+    stale.send(attach_message(id, &client, 1));
     assert_eq!(text(&stale.recv(), "type").unwrap(), "ConnectionSuperseded");
     let cleanup = host.command(&["terminate", &id.to_string(), "--yes"]);
     assert!(

@@ -53,6 +53,7 @@ Usage:\n\
   arterm list [--json]\n\
   arterm remove ALIAS\n\
   arterm connect ALIAS [REF] [--shell EXE] [--cwd PATH] [--retries 0..20] [--timeout 60s]\n\
+  arterm resume ALIAS REF [--retries 0..20] [--timeout 60s]\n\
   arterm list --client [--json] | list --server MACHINE [--json] [--timeout 60s]\n\
   arterm send MACHINE SESSION --command TEXT [--command-id UUID] [--timeout 60s] [--wait] [--json]\n\
   arterm send MACHINE SESSION --file LOCALPATH [--json]\n\
@@ -69,6 +70,7 @@ Offline, disconnected, and unconfirmed references are retained; remote existence
 Connecting a retired session name creates fresh identity/state; an old GUID never resolves to its replacement.\n\
 Use list --server MACHINE for current authorized remote inventory, including detached running sessions.\n\
 Without REF, connect only prints a reusable command. Names are not passwords.\n\
+Host aliases are canonical; resume and GUID lookup never create. Fresh authorized clients need no copied recovery files.\n\
 Tunnel startup defaults to 60s per attempt; connect, doctor ALIAS, list --server and terminate accept --timeout in positive whole seconds (e.g. 120s).\n\
 This covers authentication checks, discovery and control-port readiness, not the session lifetime, host handshake or interactive sign-in recovery.\n\
 Control commands print readable results by default; use --json for structured automation output.\n\
@@ -267,13 +269,13 @@ fn probe_retirement(config: &ClientConfig, target: &Target, address: Option<&str
 
 fn terminate_remote(config: &ClientConfig, target: &Target, address: Option<&str>, timeout: Duration,
     state: &store::State) -> Result<client_protocol::Termination> {
-    if state.token.is_none() {
+    if state.mode == store::SessionMode::CreatePending {
         if state.ended {
             if let Ok(Some(reason)) = probe_retirement(config, target, address, timeout, state) {
                 return Ok(client_protocol::Termination::Retired(reason));
             }
         }
-        bail!("no saved resume credential; remote existence remains unknown and reference was retained");
+        bail!("creation not confirmed; remote existence remains unknown and reference was retained");
     }
     ensure!(state.origin.is_some(), "no saved broker identity; reference retained");
     let outcome = {
@@ -283,7 +285,7 @@ fn terminate_remote(config: &ClientConfig, target: &Target, address: Option<&str
     if outcome != client_protocol::Termination::Rejected { return Ok(outcome); }
     match probe_retirement(config, target, address, timeout, state) {
         Ok(Some(reason)) => Ok(client_protocol::Termination::Retired(reason)),
-        _ => bail!("saved session credential rejected; remote existence remains unconfirmed and reference was retained"),
+        _ => bail!("saved session identity rejected; remote existence remains unconfirmed and reference was retained"),
     }
 }
 
@@ -313,8 +315,7 @@ fn already_retired(id: Uuid, reason: store::RetirementReason) -> serde_json::Val
 #[test]
 fn accepted_unconfirmed_rejects_contradictory_exit_flags_without_mutation_or_completion() {
     let mut state = store::State::new("fixture".into(), "powershell.exe".into(), vec![], None);
-    state.claim = store::random_claim().unwrap();
-    state.token = Some(vec![9; 32]);
+    state.mode = store::SessionMode::Attached;
     state.origin = Some(vec![7; 16]);
     state.exit_confirmed = Some(true);
     let before = serde_json::to_vec(&state).unwrap();
@@ -349,12 +350,12 @@ fn quote_command_arg(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
-fn session_command(alias: &str, reference: &SessionReference, retries: u32, flags: &ConnectionFlags, _create: bool) -> Result<String> {
+fn session_command(alias: &str, reference: &SessionReference, retries: u32, flags: &ConnectionFlags, create: bool) -> Result<String> {
     let exe = std::env::current_exe()?;
     let mut parts = vec![
         "&".into(),
         quote_command_arg(&exe.to_string_lossy()),
-        "connect".into(),
+        if create { "connect".into() } else { "resume".into() },
         quote_command_arg(alias),
         reference.as_str().to_owned(),
         "--retries".into(),
@@ -409,7 +410,11 @@ fn run_session(
     let retries = flags.retries.unwrap_or(DEFAULT_RETRIES);
     let timeout = flags.connection_timeout();
     let state_dir = client_config::state_dir(root, &target);
-    let (store, state) = match Store::resolve(&state_dir, &target.target_id, reference, create, flags.shell.as_deref(), flags.cwd.as_deref()) {
+    let (store, state) = match Store::resolve_with_host(&state_dir, &target.target_id, reference, create,
+        flags.shell.as_deref(), flags.cwd.as_deref(), &mut |reference| {
+            let mut link = connect_link(&config, &target, flags.address.as_deref(), timeout)?;
+            client_protocol::resolve_session(&mut link, &target.target_id, reference)
+        }) {
         Ok(resolved) => resolved,
         Err(error) if error.is::<store::RecoveryBlocked>() => {
             let (store, state) = Store::resolve_for_management(&state_dir, &target.target_id, reference)?;
@@ -426,7 +431,7 @@ fn run_session(
     let store = std::sync::Arc::new(store);
     let service_store = store.clone();
     let id = state.id;
-    let command = session_command(alias, reference, retries, &flags, create)?;
+    let command = session_command(alias, &SessionReference::parse(&id.to_string())?, retries, &flags, false)?;
     eprintln!("[session] GUID {id}; Ctrl+] detaches without killing the remote shell.");
     print_recovery(id, &command);
     let mut owner = Owner::start(root, &target.target_id, alias, id, state.reference.clone())?;
@@ -435,12 +440,7 @@ fn run_session(
     let service_config = config.clone();
     let service_target = target.clone();
     let service_address = flags.address.clone();
-    let mut engine = if Uuid::parse_str(reference.as_str()).is_ok()
-        && state.reference.is_none() && state.token.is_some() {
-        Engine::resume_guid(state)
-    } else {
-        Engine::new(state)
-    };
+    let mut engine = Engine::new(state);
     let admission = engine.transfer_admission();
     let files = std::sync::Mutex::new(file_protocol::Files::default());
     owner.set_service(std::sync::Arc::new(move |operation_id, action, check| {
@@ -450,7 +450,7 @@ fn run_session(
         } else {
             ensure!(!state.ended, "session has ended or its recovery is blocked");
         }
-        ensure!(state.token.is_some(), "session is not authorized");
+        ensure!(state.mode == store::SessionMode::Attached, "session is not attached");
         check()?;
         if matches!(action, Operation::FileSend { .. } | Operation::FileReceive { .. }) {
             let ticket = admission.ticket().context("file transfer unsupported or attachment unavailable")?;
@@ -830,15 +830,17 @@ fn command(args: &[String]) -> Result<u32> {
             remove_target(&root, &args[1..])?;
             Ok(0)
         }
-        Some("connect") => {
+        Some("connect" | "resume") => {
+            let create = args[0] == "connect";
             let alias = args.get(1).context("connect requires an alias")?;
             client_config::validate_alias(alias)?;
             let reference = args.get(2).filter(|value| !value.starts_with("--"));
             let flags = parse_connection_flags(&args[if reference.is_some() { 3 } else { 2 }..], true)?;
             if let Some(reference) = reference {
-                run_session(&root, alias, &SessionReference::parse(reference)?, true, flags)
+                run_session(&root, alias, &SessionReference::parse(reference)?, create, flags)
             } else {
-                let reference = SessionReference::parse(&Uuid::now_v7().to_string())?;
+                ensure!(create, "resume requires an existing host GUID or alias");
+                let reference = SessionReference::parse(&format!("session-{}", Uuid::now_v7()))?;
                 println!("{}", session_command(alias, &reference, flags.retries.unwrap_or(DEFAULT_RETRIES), &flags, true)?);
                 Ok(0)
             }

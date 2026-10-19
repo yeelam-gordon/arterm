@@ -68,16 +68,23 @@ pub struct PendingInput {
     pub seq: u64,
     pub bytes: Vec<u8>,
 }
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMode {
+    CreatePending,
+    AttachOnly,
+    Attached,
+}
 #[derive(Serialize, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct State {
     pub schema: u32,
     pub id: Uuid,
     pub box_name: String,
     pub request_id: Uuid,
-    pub claim: Vec<u8>,
+    pub mode: SessionMode,
     pub client_id: Uuid,
     pub origin: Option<Vec<u8>>,
-    pub token: Option<Vec<u8>>,
     pub epoch: u64,
     pub create_epoch: u64,
     pub shell: String,
@@ -104,15 +111,13 @@ fn legacy_command_execution() -> Option<bool> { Some(false) }
 impl State {
     pub fn new(box_name: String, shell: String, args: Vec<String>, cwd: Option<String>) -> Self {
         Self {
-            schema: 1,
+            schema: 2,
             id: Uuid::now_v7(),
             box_name,
             request_id: Uuid::now_v7(),
-            // Resume authorization is server-issued; the create claim uses OS RNG below.
-            claim: Vec::new(),
+            mode: SessionMode::CreatePending,
             client_id: Uuid::now_v7(),
             origin: None,
-            token: None,
             epoch: 0,
             create_epoch: 1,
             shell,
@@ -145,8 +150,6 @@ impl State {
         self.ended = true;
         self.exit_confirmed = Some(reason == RetirementReason::Completed);
         self.retirement_reason = Some(reason);
-        self.claim.clear();
-        self.token = None;
         self.pending = None;
         self.args.clear();
         self.cwd = None;
@@ -169,7 +172,7 @@ impl State {
     pub fn broker_binding_is_safe(&self) -> bool {
         match &self.origin {
             Some(origin) => origin.len() == 16,
-            None => self.token.is_none() && self.pending.is_none() && self.epoch == 0
+            None => self.mode == SessionMode::CreatePending && self.pending.is_none() && self.epoch == 0
                 && self.input_ack == 0 && self.create_deadline_ms.is_none(),
         }
     }
@@ -299,7 +302,7 @@ fn required_guard_reference<'de, D: serde::Deserializer<'de>>(
 
 impl Lifecycle {
     fn validate(&self, box_name: &str, id: Uuid) -> Result<()> {
-        ensure!(self.schema == 1 && self.id == id && self.box_name == box_name,
+        ensure!((self.schema == 1 || self.schema == 2) && self.id == id && self.box_name == box_name,
             "session identity/box mismatch");
         if let Some(reference) = &self.reference {
             ensure!(SessionReference::parse(reference)?.as_str() == reference,
@@ -356,22 +359,44 @@ fn validated_record(plain: &[u8], box_name: &str, id: Uuid) -> Result<(Lifecycle
             && guard.box_name == box_name, "retired guard identity/box mismatch");
         return Ok((lifecycle, None));
     }
-    let state: State = serde_json::from_slice(plain)
+    let mut value: serde_json::Value = serde_json::from_slice(plain)?;
+    if lifecycle.schema == 1 {
+        let claim = value.get("claim").and_then(serde_json::Value::as_array)
+            .context("invalid legacy create claim")?;
+        ensure!(claim.len() == 32 && claim.iter().all(|v| v.as_u64().is_some_and(|n| n <= 255)),
+            "invalid legacy create claim");
+        let attached = match value.get("token") {
+            Some(serde_json::Value::Null) => false,
+            Some(serde_json::Value::Array(token)) => {
+                ensure!(token.len() == 32 && token.iter().all(|v| v.as_u64().is_some_and(|n| n <= 255)),
+                    "invalid legacy resume token");
+                true
+            }
+            _ => anyhow::bail!("invalid legacy resume token"),
+        };
+        value["schema"] = 2.into();
+        value["mode"] = if attached { "attached" } else { "create_pending" }.into();
+        let fields = value.as_object_mut().context("invalid legacy state")?;
+        fields.remove("claim");
+        fields.remove("token");
+    }
+    let state: State = serde_json::from_value(value)
         .map_err(|_| anyhow::anyhow!("invalid protected state"))?;
     validate_state(&state, box_name, id)?;
     Ok((lifecycle, Some(state)))
 }
 
 fn validate_state(state: &State, box_name: &str, id: Uuid) -> Result<()> {
-    ensure!(state.schema == 1 && state.id == id && state.box_name == box_name,
+    ensure!(state.schema == 2 && state.id == id && state.box_name == box_name,
         "session identity/box mismatch");
     if let Some(reference) = &state.reference {
         ensure!(SessionReference::parse(reference)?.as_str() == reference, "invalid protected reference");
     }
     validate_lifecycle_knowledge(state.ended, state.exit_confirmed, state.retirement_reason)?;
-    ensure!(state.claim.len() == 32, "invalid create claim");
-    ensure!(state.token.as_ref().map_or(true, |token| token.len() == 32), "invalid resume token");
     ensure!(state.origin.as_ref().map_or(true, |origin| origin.len() == 16), "invalid broker identity");
+    ensure!(state.broker_binding_is_safe(), "unsafe recovery broker binding");
+    ensure!(state.mode == SessionMode::Attached || (state.pending.is_none() && state.input_ack == 0),
+        "unattached recovery state contains committed or pending input");
     ensure!(state.create_epoch > 0 && state.create_epoch < u64::MAX && state.epoch < u64::MAX
         && state.input_ack < u64::MAX, "invalid recovery counters");
     if let Some(pending) = &state.pending {
@@ -428,6 +453,80 @@ fn lock_record(path: &Path) -> Result<(File, bool)> {
 }
 
 impl Store {
+    /// Local records pin identity; only the host can resolve an unfamiliar name.
+    pub fn resolve_with_host(
+        dir: &Path, box_name: &str, reference: &SessionReference, create: bool,
+        shell: Option<&str>, cwd: Option<&str>,
+        lookup: &mut impl FnMut(&SessionReference) -> Result<Option<State>>,
+    ) -> Result<(Self, State)> {
+        let guid = Uuid::parse_str(reference.as_str()).ok();
+        let known = if let Some(id) = guid {
+            dir.join(format!("{id}.dpapi")).try_exists()? || dir.join(format!("{id}.lock")).try_exists()?
+        } else {
+            dir.join(format!("ref-{}.json", reference.as_str())).try_exists()?
+                || dir.join(format!("ref-{}.lock", reference.as_str())).try_exists()?
+        };
+        if known {
+            match Self::resolve(dir, box_name, reference, false, shell, cwd) {
+                Ok((store, mut state)) => {
+                    if (!create || guid.is_some()) && state.mode == SessionMode::CreatePending {
+                        let resolved = lookup(&SessionReference::parse(&state.id.to_string())?)?
+                            .context("host session not found; resume never creates")?;
+                        ensure!(state.origin.is_some() && state.origin == resolved.origin,
+                            "pending creation broker changed; refusing resume or recreation");
+                        state.mode = SessionMode::AttachOnly;
+                        store.save(&state)?;
+                    }
+                    return Ok((store, state));
+                }
+                Err(error) if create && guid.is_none() && error.is::<RetiredSession>() => {
+                    ensure!(lookup(reference)?.is_none(),
+                        "host alias has been reused; saved GUID remains retired; use the new GUID explicitly");
+                    return Self::resolve(dir, box_name, reference, true, shell, cwd);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        let Some(mut state) = lookup(reference)? else {
+            ensure!(create && guid.is_none(), "host session not found; resume/GUID lookup never creates");
+            return Self::resolve(dir, box_name, reference, true, shell, cwd);
+        };
+        ensure!(guid.map_or(true, |id| id == state.id), "resolved session identity mismatch");
+        ensure!(shell.map_or(true, |s| s == state.shell), "incompatible --shell for host session");
+        ensure!(cwd.map_or(true, |c| state.cwd.as_deref() == Some(c)), "incompatible --cwd for host session");
+        state.reference = guid.is_none().then(|| reference.as_str().to_owned());
+        validate_state(&state, box_name, state.id)?;
+        ensure!(state.mode == SessionMode::AttachOnly && !state.ended, "invalid host resolution");
+        if guid.is_none() && (dir.join(format!("{}.dpapi", state.id)).try_exists()?
+            || dir.join(format!("{}.lock", state.id)).try_exists()?) {
+            let (mut store, mut saved) = Self::resolve(dir, box_name,
+                &SessionReference::parse(&state.id.to_string())?, false, shell, cwd)?;
+            ensure!(saved.origin == state.origin && saved.reference.is_none()
+                && saved.mode != SessionMode::CreatePending, "known session binding cannot be replaced");
+            let (lock, known) = lock_record(&dir.join(format!("ref-{}.lock", reference.as_str())))?;
+            ensure!(!known, "local alias changed during lookup; retry");
+            store._reference_lock = Some(lock);
+            saved.reference = state.reference;
+            store.save(&saved)?;
+            atomic_write(&dir.join(format!("ref-{}.json", reference.as_str())), &serde_json::to_vec(&saved.id)?)?;
+            return Ok((store, saved));
+        }
+        fs::create_dir_all(dir)?;
+        let reference_lock = if guid.is_none() {
+            let (lock, known) = lock_record(&dir.join(format!("ref-{}.lock", reference.as_str())))?;
+            ensure!(!known, "local alias changed during lookup; retry");
+            Some(lock)
+        } else { None };
+        let mut store = Self::open(dir, state.id)?;
+        ensure!(!store.known && !store.path.try_exists()?, "session already known locally; use its saved identity");
+        store._reference_lock = reference_lock;
+        store.save(&state)?;
+        if guid.is_none() {
+            atomic_write(&dir.join(format!("ref-{}.json", reference.as_str())), &serde_json::to_vec(&state.id)?)?;
+        }
+        Ok((store, state))
+    }
+
     pub fn open(dir: &Path, id: Uuid) -> Result<Self> {
         fs::create_dir_all(dir)?;
         let (lock, known) = lock_record(&dir.join(format!("{id}.lock")))?;
@@ -510,7 +609,6 @@ impl Store {
                                 let mut fresh = State::new(box_name.to_owned(),
                                     shell.unwrap_or("powershell.exe").to_owned(), Vec::new(), cwd.map(str::to_owned));
                                 fresh.reference = Some(reference.as_str().to_owned());
-                                fresh.claim = random_claim()?;
                                 let mut replacement = Store::open(dir, fresh.id)?;
                                 ensure!(!replacement.known && !replacement.path.try_exists()?,
                                     "fresh session identity already reserved");
@@ -540,7 +638,6 @@ impl Store {
             if new_mapping {
                 state.reference = Some(reference.as_str().to_owned());
             }
-            state.claim = random_claim()?;
             store.save(&state)?;
             state
         };
@@ -705,6 +802,52 @@ pub fn random_claim() -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn legacy_migration_drops_secrets_but_preserves_replay_identity_and_rejects_unbound_state() {
+        use super::*;
+        let mut state = State::new("box".into(), "powershell.exe".into(), vec![], None);
+        state.mode = SessionMode::Attached;
+        state.origin = Some(vec![3; 16]);
+        state.epoch = 7;
+        state.input_ack = 4;
+        state.pending = Some(PendingInput { seq: 5, bytes: b"pending".to_vec() });
+        let mut value = serde_json::to_value(&state).unwrap();
+        value["schema"] = 1.into();
+        value["claim"] = serde_json::json!(vec![8u8; 32]);
+        value["token"] = serde_json::json!(vec![9u8; 32]);
+        value.as_object_mut().unwrap().remove("mode");
+        let load = |value: &serde_json::Value| validated_record(&serde_json::to_vec(value).unwrap(), "box", state.id);
+        let migrated = load(&value).unwrap().1.unwrap();
+        assert_eq!((migrated.client_id, migrated.epoch, migrated.input_ack), (state.client_id, 7, 4));
+        assert_eq!(migrated.pending.as_ref().unwrap().seq, 5);
+        assert_eq!(migrated.mode, SessionMode::Attached);
+        let rewritten = serde_json::to_value(migrated).unwrap();
+        assert!(rewritten.get("token").is_none() && rewritten.get("claim").is_none());
+        value["origin"] = serde_json::Value::Null;
+        assert!(load(&value).is_err());
+        value["origin"] = serde_json::json!(vec![3u8; 16]);
+        value["token"] = serde_json::json!([9]);
+        assert!(load(&value).is_err());
+    }
+
+    #[test]
+    fn failed_host_resolution_never_publishes_local_references_or_creates_guid() {
+        use super::*;
+        let dir = std::env::temp_dir().join(format!("owner-lookup-{}", Uuid::now_v7()));
+        for name in ["unknown".to_owned(), Uuid::now_v7().to_string()] {
+            let reference = SessionReference::parse(&name).unwrap();
+            assert!(Store::resolve_with_host(&dir, "box", &reference, false, None, None,
+                &mut |_| Ok(None)).is_err());
+            assert!(!dir.exists());
+            assert!(Store::resolve_with_host(&dir, "box", &reference, true, None, None,
+                &mut |_| anyhow::bail!("unreachable")).is_err());
+            assert!(!dir.exists());
+        }
+        let guid = SessionReference::parse(&Uuid::now_v7().to_string()).unwrap();
+        assert!(Store::resolve_with_host(&dir, "box", &guid, true, None, None, &mut |_| Ok(None)).is_err());
+        assert!(!dir.exists());
+    }
+
+    #[test]
     fn legacy_records_do_not_opt_into_command_integration() {
         let state = super::State::new("target".into(), "powershell.exe".into(), vec![], None);
         assert_eq!(state.command_execution, None);
@@ -717,8 +860,7 @@ mod tests {
     #[test]
     fn existing_only_guid_lookup_preserves_legacy_state_and_interrupted_reservations() {
         let dir = std::env::temp_dir().join(format!("arterm-guid-lookup-{}", Uuid::now_v7()));
-        let mut state = State::new("box".into(), "powershell.exe".into(), vec![], None);
-        state.claim = random_claim().unwrap();
+        let state = State::new("box".into(), "powershell.exe".into(), vec![], None);
         let store = Store::open(&dir, state.id).unwrap();
         store.save(&state).unwrap();
         drop(store);
@@ -726,7 +868,7 @@ mod tests {
         let reference = SessionReference::parse(&state.id.to_string()).unwrap();
         let (store, loaded) = Store::resolve(&dir, "box", &reference, false, None, None).unwrap();
         assert_eq!(loaded.id, state.id);
-        assert_eq!(loaded.claim, state.claim);
+        assert_eq!(loaded.mode, state.mode);
         assert!(Store::resolve(&dir, "box", &reference, false, None, None).is_err());
         drop(store);
 
@@ -746,14 +888,13 @@ mod tests {
         let reference = SessionReference::parse("MyWork").unwrap();
         let (store, mut state) = Store::resolve(&dir, "box", &reference, true, None, None).unwrap();
         let id = state.id;
-        let claim = state.claim.clone();
         let request = state.request_id;
         assert!(Store::resolve(&dir, "box", &reference, true, None, None).is_err());
         assert!(Store::open(&dir, id).is_err());
         drop(store);
         let lower = SessionReference::parse("mywork").unwrap();
         let (store, loaded) = Store::resolve(&dir, "box", &lower, true, None, None).unwrap();
-        assert_eq!((loaded.id, loaded.request_id, loaded.claim), (id, request, claim));
+        assert_eq!((loaded.id, loaded.request_id), (id, request));
         drop(store);
         assert!(Store::resolve(&dir, "box", &lower, true, Some("other.exe"), None).is_err());
         assert!(Store::resolve(&dir, "box", &lower, true, None, Some(r"C:\other")).is_err());
@@ -817,12 +958,12 @@ mod tests {
     fn protected_roundtrip_and_local_lock() {
         let dir = std::env::temp_dir().join(format!("devbox-state-test-{}", Uuid::now_v7()));
         let mut state = State::new("box".into(), "pwsh".into(), vec![], None);
-        state.claim = random_claim().unwrap();
-        state.token = Some(vec![42; 32]);
+        state.mode = SessionMode::Attached;
+        state.origin = Some(vec![42; 16]);
         {
             let store = Store::open(&dir, state.id).unwrap();
             store.save(&state).unwrap();
-            assert_eq!(store.load("box", state.id).unwrap().token, state.token);
+            assert_eq!(store.load("box", state.id).unwrap().mode, state.mode);
             assert!(store.load("other-box", state.id).is_err());
             assert!(Store::open(&dir, state.id).is_err());
             let bytes = fs::read(&store.path).unwrap();

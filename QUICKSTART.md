@@ -202,7 +202,7 @@ Host setup/startup authentication and installer sign-in behavior are unchanged.
 No session recovery files or host registrations need to be deleted.
 
 `connect MACHINE` only prints a reusable command and exits, without a
-remote connection. `connect MACHINE SESSION` creates on first use and recovers the
+remote connection. `connect MACHINE NAME` creates an absent host alias and recovers the
 same session on later use. Type the complete command so your shell saves it
 normally; arTerm no longer inserts PSReadLine history automatically.
 `MyWork` is a non-secret reference, not a resume password. Names are
@@ -434,7 +434,14 @@ timeout reports `IntegrationNotEstablished` with `submitted: false`; unknown
 startup input is not classified as a busy managed command. Explicitly unsupported
 sessions fail immediately instead of consuming the readiness budget.
 
-Machine always precedes session. Plain `list` displays locally known session
+Machine always precedes session. To resume from another authorized client, register the same host
+and run `arterm resume MACHINE NAME-or-GUID`; no recovery files need copying.
+Aliases are resolved by the host, not another client's cache. Resume never
+creates; `connect` creates an absent alias, while a GUID always means existing-only.
+Saved aliases remain pinned to their previous GUID after host-side name reuse.
+There is no per-session resume token; DPAPI still protects local pending input
+and recovery state, and file transfers still require the live writer lease.
+Plain `list` displays locally known session
 names and IDs, filtering only sessions the client knows have ended.
 `list --json` provides the same inventory structurally. Unknown or uncertain
 records remain visible, including after a host reboot or broker-identity change.
@@ -460,7 +467,7 @@ queries the authorized host inventory, including detached sessions. Each
 `send`, `read`, `interrupt`, and `detach` require the exact active local owner
 or fail. A detached session must be reattached before using those controls.
 `list --server` and `terminate` do not need an active local owner, but still
-require authorization; termination needs the saved session credential.
+require the verified host-owner boundary; termination does not need a saved session token.
 `terminate MACHINE SESSION` accepts either the session name or its canonical
 GUID in that same positional argument; there is no separate name/GUID flag.
 Repeated termination of a retired reference reports its ended/nonexistent
@@ -745,17 +752,11 @@ process injection, or code invoking the legitimate CLI.
 <details>
 <summary>Legacy hosts and existing installations</summary>
 
-Reusable `connect` requires the host's
-`ended-session-rejection` capability. An unsupported host is rejected before
-creation or attachment; the locally reserved reference remains available for
-retry with a compatible host.
-
-For a still-live 0.2 session, `connect` with its saved GUID
-can use an existing unnamed record with a saved credential. It warns that the
-old host may instead replay an already-ended session and return its old exit
-code. This compatibility path does not apply to named records or tokenless
-creation recovery. Retain the matching 0.2 client for interrupted legacy
-creations. Finish old sessions before upgrading the host; do not stop or update
+`connect` and `resume` require `owner-authorized-resume-v1` and
+`ended-session-rejection`. Older hosts fail before creation or attachment;
+new hosts reject older clients. There is no token-based compatibility fallback.
+Retain the matching old client for old live sessions or interrupted creations.
+Finish old sessions before upgrading the host; do not stop or update
 it while relying on live shells. No automatic host upgrade is performed.
 
 arTerm 0.5 retains VsTerm GUID recovery records and byte-identical legacy

@@ -43,6 +43,7 @@ use arterm::{
 };
 
 const CAPS: &[&str] = &[
+    "owner-authorized-resume-v1",
     "session-create",
     "create-reservation",
     "session-resume",
@@ -191,7 +192,7 @@ struct SessionState {
     attachment: Option<Attachment>,
     attachment_connection: Option<Arc<AtomicBool>>,
     highest_epochs: HashMap<Vec<u8>, u64>,
-    input_committed: u64,
+    input_committed: HashMap<Vec<u8>, u64>,
     resize_generation: u64,
     exit: Option<u32>,
     exited_at: Option<Instant>,
@@ -201,7 +202,7 @@ struct SessionState {
 struct Session {
     id: Uuid,
     diagnostic_log: Weak<ReadinessLog>,
-    token: Vec<u8>,
+    fingerprint: Fingerprint,
     state: Mutex<SessionState>,
     input: Mutex<Option<SyncSender<Vec<u8>>>>,
     master: Mutex<Box<dyn MasterPty + Send>>,
@@ -348,7 +349,8 @@ impl Drop for FileConnection {
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
 struct Fingerprint {
     session_id: Uuid,
-    claim: Vec<u8>,
+    #[serde(default)]
+    session_alias: Option<String>,
     shell: String,
     args: Vec<String>,
     cwd: Option<String>,
@@ -363,7 +365,6 @@ struct Reservation {
     request_id: Uuid,
     broker: Vec<u8>,
     fingerprint: Fingerprint,
-    token: Vec<u8>,
     created_ms: u64,
     active: bool,
 }
@@ -375,6 +376,7 @@ struct Broker {
     instance: Vec<u8>,
     sessions: Mutex<HashMap<Uuid, Arc<Session>>>,
     reservations: Mutex<HashMap<Uuid, Reservation>>,
+    aliases: Mutex<HashMap<String, Uuid>>,
     create_lock: Mutex<()>,
     stopping: AtomicBool,
 }
@@ -449,7 +451,7 @@ fn load_reservation(root: &Path, request: Uuid) -> Result<Option<Reservation>> {
 }
 
 impl Session {
-    fn spawn(id: Uuid, token: Vec<u8>, fp: &Fingerprint, diagnostic_log: Weak<ReadinessLog>) -> Result<Arc<Self>> {
+    fn spawn(id: Uuid, fp: &Fingerprint, diagnostic_log: Weak<ReadinessLog>) -> Result<Arc<Self>> {
         let job = Job::new()?;
         let pair = native_pty_system().openpty(PtySize {
             rows: fp.rows,
@@ -494,7 +496,7 @@ impl Session {
         let session = Arc::new(Self {
             id,
             diagnostic_log,
-            token,
+            fingerprint: fp.clone(),
             transfers: Mutex::new(FileState::default()),
             state: Mutex::new(SessionState {
                 output: VecDeque::new(),
@@ -503,7 +505,7 @@ impl Session {
                 attachment: None,
                 attachment_connection: None,
                 highest_epochs: HashMap::new(),
-                input_committed: 0,
+                input_committed: HashMap::new(),
                 resize_generation: 0,
                 exit: None,
                 exited_at: None,
@@ -720,7 +722,7 @@ impl Broker {
         serde_json::Value::Array(sessions.into_iter().filter_map(|session| {
             let state = session.state.lock().unwrap();
             if !include_exited && state.exit.is_some() { return None; }
-            Some(serde_json::json!({"id":session.id,"pid":state.pid,"exited":state.exit.is_some(),
+            Some(serde_json::json!({"id":session.id,"alias":session.fingerprint.session_alias,"pid":state.pid,"exited":state.exit.is_some(),
                 "attached":state.attachment.is_some(),"state":if state.exit.is_some() {"exited"} else {"running"}}))
         }).collect())
     }
@@ -739,6 +741,7 @@ impl Broker {
             instance: random16()?,
             sessions: Mutex::new(HashMap::new()),
             reservations: Mutex::new(HashMap::new()),
+            aliases: Mutex::new(HashMap::new()),
             create_lock: Mutex::new(()),
             stopping: AtomicBool::new(false),
         }))
@@ -762,8 +765,13 @@ impl Broker {
         self.prune_exited(Instant::now(), EXITED_HISTORY_RETENTION, MAX_EXITED_HISTORY);
         let request_id = parse_uuid16(body, "request_id")?;
         let session_id = Uuid::parse_str(text(body, "requested_session_id")?)?;
-        let claim = binary(body, "create_claim")?;
-        ensure!(claim.len() == 32, "invalid create claim");
+        let session_alias = get(body, "session_alias").ok().filter(|v| !v.is_nil())
+            .map(|v| -> Result<String> {
+                let name = v.as_str().context("invalid session alias")?;
+                let reference = store::SessionReference::parse(name)?;
+                ensure!(reference.as_str() == name && Uuid::parse_str(name).is_err(), "invalid session alias");
+                Ok(name.to_owned())
+            }).transpose()?;
         ensure!(
             bin16(body, "origin_broker_instance_id")? == self.instance,
             "origin broker mismatch"
@@ -781,7 +789,7 @@ impl Broker {
         };
         let fp = Fingerprint {
             session_id,
-            claim,
+            session_alias,
             shell: text(body, "shell")?.to_owned(),
             args,
             cwd,
@@ -813,7 +821,7 @@ impl Broker {
         }
         if let Some(existing) = load_reservation(&self.root, request_id)? {
             ensure!(
-                existing.schema == 1 && existing.broker == self.instance,
+                existing.schema == 2 && existing.broker == self.instance,
                 "CreateRecoveryUnavailable"
             );
             ensure!(existing.fingerprint == fp, "CreateRequestConflict");
@@ -833,18 +841,28 @@ impl Broker {
             !self.sessions.lock().unwrap().contains_key(&session_id),
             "SessionIdConflict"
         );
-        let token = store::random_claim()?;
+        if let Some(name) = &fp.session_alias {
+            if let Some(id) = self.aliases.lock().unwrap().get(name) {
+                if let Some(old) = self.sessions.lock().unwrap().get(id) {
+                    ensure!(old.state.lock().unwrap().exit.is_some() && old.job.empty()?, "SessionAliasConflict");
+                }
+            }
+        }
+        // Never revive an old GUID, including after exited-history pruning/restart.
+        let identities = self.root.join("host").join("identities");
+        fs::create_dir_all(&identities)?;
+        OpenOptions::new().write(true).create_new(true)
+            .open(identities.join(session_id.to_string())).context("SessionIdConflict")?.sync_all()?;
         let mut reservation = Reservation {
-            schema: 1,
+            schema: 2,
             request_id,
             broker: self.instance.clone(),
             fingerprint: fp.clone(),
-            token: token.clone(),
             created_ms: now_ms(),
             active: false,
         };
         save_reservation(&self.root, &reservation)?;
-        let session = Session::spawn(session_id, token, &fp,
+        let session = Session::spawn(session_id, &fp,
             self.diagnostic_log.as_ref().map(Arc::downgrade).unwrap_or_default())?;
         reservation.active = true;
         save_reservation(&self.root, &reservation)?;
@@ -856,6 +874,9 @@ impl Broker {
             .lock()
             .unwrap()
             .insert(session_id, session.clone());
+        if let Some(name) = &fp.session_alias {
+            self.aliases.lock().unwrap().insert(name.clone(), session_id);
+        }
         let attachment = Attachment {
             id: random16()?,
             lease: random16()?,
@@ -980,6 +1001,11 @@ impl Broker {
             "protocol v1 is not supported by peer"
         );
         let client = bin16(hello_body, "client_instance_id")?;
+        if !get(hello_body, "capabilities")?.as_array().context("invalid capabilities")?
+            .iter().any(|v| v.as_str() == Some("owner-authorized-resume-v1")) {
+            send(&mut output, error("OwnerResumeCapabilityRequired", "upgrade client: owner-authorized-resume-v1 required"))?;
+            return Ok(());
+        }
         let command_capable = get(hello_body, "capabilities")?.as_array()
             .context("invalid capabilities")?.iter().any(|v| v.as_str() == Some(COMMAND_CAPABILITY));
         let management_capable = get(hello_body, "capabilities")?.as_array().context("invalid capabilities")?
@@ -1019,14 +1045,38 @@ impl Broker {
                     let kind = text(&value, "type")?;
                     let body = get(&value, "body")?;
                     match kind {
+                        "ResolveSession" => {
+                            let reference = store::SessionReference::parse(text(body, "reference")?)?;
+                            let id = Uuid::parse_str(reference.as_str()).ok().or_else(||
+                                self.aliases.lock().unwrap().get(reference.as_str()).copied());
+                            let session = id.and_then(|id| self.sessions.lock().unwrap().get(&id).cloned());
+                            if let Some(session) = session {
+                                let st = session.state.lock().unwrap();
+                                if st.exit.is_some() {
+                                    send(&mut output, message("SessionMissing", map(vec![])))?;
+                                } else {
+                                    let fp = &session.fingerprint;
+                                    send(&mut output, message("SessionResolved", map(vec![
+                                        ("session_id", s(&session.id.to_string())),
+                                        ("broker_instance_id", Value::Binary(self.instance.clone())),
+                                        ("session_alias", fp.session_alias.as_deref().map(s).unwrap_or(Value::Nil)),
+                                        ("shell", s(&fp.shell)),
+                                        ("args", Value::Array(fp.args.iter().map(|arg| s(arg)).collect())),
+                                        ("cwd", fp.cwd.as_deref().map(s).unwrap_or(Value::Nil)),
+                                        ("command_execution", fp.command_execution.into()),
+                                    ])))?;
+                                }
+                            } else {
+                                send(&mut output, message("SessionMissing", map(vec![])))?;
+                            }
+                        }
                         "FileAuthorize" => {
                             let authorized = (|| -> Result<FileBridge> {
                                 ensure!(file_capable && file_bridge.is_none(), "FileUnauthorized");
                                 ensure!(bin16(body, "broker_instance_id")? == self.instance, "FileUnauthorized");
                                 let id = Uuid::parse_str(text(body, "session_id")?)?;
                                 let session = self.sessions.lock().unwrap().get(&id).cloned().context("FileUnauthorized")?;
-                                ensure!(binary(body, "resume_token")? == session.token &&
-                                    bin16(body, "client_instance_id")? == client, "FileUnauthorized");
+                                ensure!(bin16(body, "client_instance_id")? == client, "FileUnauthorized");
                                 let bridge = FileBridge {
                                     session, attachment: Attachment {
                                         id: bin16(body, "attachment_id")?, lease: bin16(body, "lease_id")?,
@@ -1111,10 +1161,6 @@ impl Broker {
                                             "SessionCreated",
                                             map(vec![
                                                 ("session_id", s(&session.id.to_string())),
-                                                (
-                                                    "resume_token",
-                                                    Value::Binary(session.token.clone()),
-                                                ),
                                                 ("requires_attach", true.into()),
                                                 ("recovered", true.into()),
                                             ]),
@@ -1123,7 +1169,7 @@ impl Broker {
                                 } else {
                                     session.state.lock().unwrap().attachment_connection = Some(connected.clone());
                                     attached = Some((session.clone(), attachment.id.clone(), attachment.epoch));
-                                    let committed = session.state.lock().unwrap().input_committed;
+                                    let committed = 0u64;
                                     cursor = num(body, "after_output_seq")?;
                                     send(
                                         &mut output,
@@ -1131,10 +1177,6 @@ impl Broker {
                                             "SessionCreated",
                                             map(vec![
                                                 ("session_id", s(&session.id.to_string())),
-                                                (
-                                                    "resume_token",
-                                                    Value::Binary(session.token.clone()),
-                                                ),
                                                 ("requires_attach", false.into()),
                                                 ("recovered", false.into()),
                                                 (
@@ -1160,6 +1202,8 @@ impl Broker {
                                     "CreateRequestConflict"
                                 } else if msg.contains("SessionIdConflict") {
                                     "SessionIdConflict"
+                                } else if msg.contains("SessionAliasConflict") {
+                                    "SessionAliasConflict"
                                 } else {
                                     "CreateFailed"
                                 };
@@ -1168,7 +1212,6 @@ impl Broker {
                         },
                         "TerminateSession" => {
                             let id = Uuid::parse_str(text(body, "session_id")?)?;
-                            let token = binary(body, "resume_token")?;
                             let Some(session) = self.sessions.lock().unwrap().get(&id).cloned()
                             else {
                                 send(
@@ -1180,16 +1223,6 @@ impl Broker {
                                 )?;
                                 continue;
                             };
-                            if session.token != token {
-                                send(
-                                    &mut output,
-                                    message(
-                                        "Unauthorized",
-                                        map(vec![("session_id", s(&id.to_string()))]),
-                                    ),
-                                )?;
-                                continue;
-                            }
                             session.terminate()?;
                             send(
                                 &mut output,
@@ -1215,7 +1248,7 @@ impl Broker {
                         }
                         "AttachSession" => {
                             let id = Uuid::parse_str(text(body, "session_id")?)?;
-                            let token = binary(body, "resume_token")?;
+                            ensure!(bin16(body, "client_instance_id")? == client, "client identity mismatch");
                             let epoch = num(body, "connection_epoch")?;
                             let Some(session) = self.sessions.lock().unwrap().get(&id).cloned()
                             else {
@@ -1228,16 +1261,6 @@ impl Broker {
                                 )?;
                                 continue;
                             };
-                            if session.token != token {
-                                send(
-                                    &mut output,
-                                    message(
-                                        "Unauthorized",
-                                        map(vec![("session_id", s(&id.to_string()))]),
-                                    ),
-                                )?;
-                                continue;
-                            }
                             let attachment = Attachment {
                                 id: random16()?,
                                 lease: random16()?,
@@ -1269,6 +1292,12 @@ impl Broker {
                                 continue;
                             }
                             let highest = st.highest_epochs.get(&client).copied().unwrap_or(0);
+                            // Never evict replay guards: refuse new identities at the bound.
+                            if !st.highest_epochs.contains_key(&client) && st.highest_epochs.len() >= 1024 {
+                                drop(st);
+                                send(&mut output, error("ClientHistoryFull", "session client identity limit reached"))?;
+                                continue;
+                            }
                             if epoch <= highest {
                                 drop(st);
                                 send(
@@ -1283,7 +1312,7 @@ impl Broker {
                             st.highest_epochs.insert(client.clone(), epoch);
                             st.attachment = Some(attachment.clone());
                             st.attachment_connection = Some(connected.clone());
-                            let committed = st.input_committed;
+                            let committed = st.input_committed.get(&client).copied().unwrap_or(0);
                             let generation = st.resize_generation;
                             drop(st);
                             attached = Some((session.clone(), attachment.id.clone(), epoch));
@@ -1366,6 +1395,7 @@ impl Broker {
                         }
                         "Input" => {
                             if let Some((session, attachment_id, _)) = &attached {
+                                ensure!(text(body, "session_id")? == session.id.to_string(), "session identity mismatch");
                                 let seq = num(body, "input_seq")?;
                                 let bytes = binary(body, "bytes")?;
                                 ensure!(!bytes.is_empty() && bytes.len() <= 4096, "invalid input");
@@ -1390,7 +1420,8 @@ impl Broker {
                                     continue;
                                 }
                                 let mut input_diagnostic = None;
-                                if seq == st.input_committed + 1 {
+                                let prior = st.input_committed.get(&client).copied().unwrap_or(0);
+                                if seq == prior.checked_add(1).context("input sequence exhausted")? {
                                     if let Some(commands) = &mut st.commands {
                                         let before = commands.diagnostic_details();
                                         let command_id = commands.active();
@@ -1418,7 +1449,7 @@ impl Broker {
                                         .context("PTY input closed")?
                                         .try_send(bytes.clone())
                                     {
-                                        Ok(()) => st.input_committed = seq,
+                                        Ok(()) => { st.input_committed.insert(client.clone(), seq); }
                                         Err(TrySendError::Full(_)) => {
                                             drop(st);
                                             session.record_input(input_diagnostic, EventKind::InputBackpressure);
@@ -1442,8 +1473,8 @@ impl Broker {
                                             bail!("PTY input closed")
                                         }
                                     }
-                                } else if seq > st.input_committed {
-                                    let expected = st.input_committed + 1;
+                                } else if seq > prior {
+                                    let expected = prior + 1;
                                     drop(st);
                                     send(
                                         &mut output,
@@ -1457,7 +1488,7 @@ impl Broker {
                                     )?;
                                     continue;
                                 }
-                                let committed = st.input_committed;
+                                let committed = st.input_committed.get(&client).copied().unwrap_or(0);
                                 drop(st);
                                 session.record_input(input_diagnostic, EventKind::Input);
                                 send(

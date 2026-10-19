@@ -80,11 +80,6 @@ pub enum Termination {
 }
 
 pub fn terminate(link: &mut impl Link, state: &State) -> Result<Termination> {
-    let token = state
-        .token
-        .clone()
-        .context("saved session has no resume credential")?;
-    ensure!(token.len() == 32, "invalid saved resume credential");
     let origin = state.origin.as_deref().context("saved broker identity unavailable; reference retained")?;
     ensure!(origin.len() == 16, "invalid saved broker identity");
     link.send(&hello(state.client_id, state.request_id))?;
@@ -95,6 +90,7 @@ pub fn terminate(link: &mut impl Link, state: &State) -> Result<Termination> {
     );
     let hello_body = get(&response, "body")?;
     ensure!(num(hello_body, "version")? == 1, "unsupported termination protocol version");
+    require_owner_resume(hello_body)?;
     let broker = arterm::wire::bin16(hello_body, "broker_instance_id")?;
     if broker != origin { return Ok(Termination::Retired(RetirementReason::BrokerChanged)); }
     let confirmed_capability = get(hello_body, "capabilities").ok().and_then(Value::as_array)
@@ -103,7 +99,6 @@ pub fn terminate(link: &mut impl Link, state: &State) -> Result<Termination> {
         "TerminateSession",
         map(vec![
             ("session_id", s(&state.id.to_string())),
-            ("resume_token", Value::Binary(token)),
             ("grace_ms", 5000.into()),
             ("reason", s("explicit")),
         ]),
@@ -148,6 +143,48 @@ pub fn terminate(link: &mut impl Link, state: &State) -> Result<Termination> {
             _ => bail!("unexpected host protocol response; reference retained"),
         }
     }
+}
+
+fn require_owner_resume(body: &Value) -> Result<()> {
+    ensure!(get(body, "capabilities")?.as_array().context("invalid capabilities")?
+        .iter().any(|v| v.as_str() == Some("owner-authorized-resume-v1")),
+        "host lacks owner-authorized-resume-v1; upgrade host; no session mutation sent");
+    Ok(())
+}
+
+pub fn resolve_session(
+    link: &mut impl Link, box_name: &str, reference: &arterm::store::SessionReference,
+) -> Result<Option<State>> {
+    let client = Uuid::now_v7();
+    link.send(&hello(client, Uuid::now_v7()))?;
+    let response = wait_message(link, Instant::now() + Duration::from_secs(20))?;
+    ensure!(text(&response, "type")? == "HelloOk", "owner session handshake rejected; upgrade host/client");
+    let body = get(&response, "body")?;
+    ensure!(num(body, "version")? == 1, "unsupported session protocol");
+    require_owner_resume(body)?;
+    let broker = arterm::wire::bin16(body, "broker_instance_id")?;
+    link.send(&message("ResolveSession", map(vec![("reference", s(reference.as_str()))])))?;
+    let response = wait_message(link, Instant::now() + Duration::from_secs(20))?;
+    if text(&response, "type")? == "SessionMissing" { return Ok(None); }
+    ensure!(text(&response, "type")? == "SessionResolved", "host session lookup rejected");
+    let body = get(&response, "body")?;
+    ensure!(arterm::wire::bin16(body, "broker_instance_id")? == broker, "lookup broker mismatch");
+    let id = Uuid::parse_str(text(body, "session_id")?)?;
+    if let Ok(expected) = Uuid::parse_str(reference.as_str()) {
+        ensure!(id == expected, "lookup GUID mismatch");
+    } else {
+        ensure!(text(body, "session_alias")? == reference.as_str(), "lookup alias mismatch");
+    }
+    let args = get(body, "args")?.as_array().context("invalid resolved args")?.iter()
+        .map(|v| v.as_str().map(str::to_owned).context("invalid resolved arg")).collect::<Result<Vec<_>>>()?;
+    let cwd = if get(body, "cwd")?.is_nil() { None } else { Some(text(body, "cwd")?.to_owned()) };
+    let mut state = State::new(box_name.to_owned(), text(body, "shell")?.to_owned(), args, cwd);
+    state.id = id;
+    state.client_id = client;
+    state.origin = Some(broker);
+    state.mode = arterm::store::SessionMode::AttachOnly;
+    state.command_execution = Some(get(body, "command_execution")?.as_bool().context("invalid resolved command policy")?);
+    Ok(Some(state))
 }
 
 fn management_handshake(link: &mut impl Link) -> Result<Value> {
@@ -233,14 +270,28 @@ mod tests {
     }
 
     #[test]
-    fn terminate_uses_saved_token() {
+    fn fresh_lookup_rejects_old_host_before_lookup_or_creation() {
+        let mut link = FakeLink { sent: vec![], received: VecDeque::from([
+            message("HelloOk", map(vec![("version", 1.into()),
+                ("broker_instance_id", Value::Binary(vec![1;16])),
+                ("capabilities", Value::Array(vec![]))])),
+        ]) };
+        let reference = arterm::store::SessionReference::parse("work").unwrap();
+        assert!(resolve_session(&mut link, "box", &reference).is_err());
+        assert_eq!(link.sent.len(), 1);
+        assert_eq!(text(&link.sent[0], "type").unwrap(), "Hello");
+    }
+
+    #[test]
+    fn terminate_uses_owner_authorization_without_session_secret() {
         let mut state = State::new("target".into(), "powershell.exe".into(), vec![], None);
-        state.token = Some(vec![9; 32]);
+        state.mode = arterm::store::SessionMode::Attached;
         state.origin = Some(vec![1; 16]);
         let mut link = FakeLink {
             sent: vec![],
             received: VecDeque::from([
-                message("HelloOk", map(vec![("version", 1.into()), ("broker_instance_id", Value::Binary(vec![1;16]))])),
+                message("HelloOk", map(vec![("version", 1.into()), ("broker_instance_id", Value::Binary(vec![1;16])),
+                    ("capabilities", Value::Array(vec![s("owner-authorized-resume-v1")]))])),
                 message(
                     "TerminateAccepted",
                     map(vec![("session_id", s(&state.id.to_string()))]),
@@ -249,11 +300,7 @@ mod tests {
         };
         assert_eq!(terminate(&mut link, &state).unwrap(), Termination::AcceptedUnconfirmed);
         assert_eq!(text(&link.sent[1], "type").unwrap(), "TerminateSession");
-        assert_eq!(
-            arterm::wire::binary(get(&link.sent[1], "body").unwrap(), "resume_token")
-                .unwrap(),
-            vec![9; 32]
-        );
+        assert!(get(get(&link.sent[1], "body").unwrap(), "resume_token").is_err());
     }
 
     fn management_link(broker: u8, inventory: serde_json::Value) -> FakeLink {
@@ -301,11 +348,11 @@ mod tests {
     #[test]
     fn unsupported_inventory_and_unauthorized_do_not_establish_nonexistence() {
         let mut state = State::new("target".into(), "powershell.exe".into(), vec![], None);
-        state.token = Some(vec![9;32]);
+        state.mode = arterm::store::SessionMode::Attached;
         state.origin = Some(vec![1;16]);
         let mut link = FakeLink { sent: vec![], received: VecDeque::from([
             message("HelloOk", map(vec![("version", 1.into()), ("broker_instance_id", Value::Binary(vec![1;16])),
-                ("capabilities", Value::Array(vec![]))])),
+                ("capabilities", Value::Array(vec![s("owner-authorized-resume-v1")]))])),
             message("Unauthorized", map(vec![("session_id", s(&state.id.to_string()))])),
         ]) };
         assert_eq!(terminate(&mut link, &state).unwrap(), Termination::Rejected);
@@ -321,7 +368,7 @@ mod tests {
     #[test]
     fn termination_keeps_unconfirmed_acceptance_separate_and_never_sends_tokens_to_changed_broker() {
         let mut state = State::new("target".into(), "powershell.exe".into(), vec![], None);
-        state.token = Some(vec![9;32]);
+        state.mode = arterm::store::SessionMode::Attached;
         state.origin = Some(vec![1;16]);
         for (reply, expected) in [
             ("SessionTerminated", Termination::Confirmed),
@@ -331,14 +378,15 @@ mod tests {
                 else { map(vec![("session_id", s(&state.id.to_string()))]) };
             let mut link = FakeLink { sent: vec![], received: VecDeque::from([
                 message("HelloOk", map(vec![("version", 1.into()), ("broker_instance_id", Value::Binary(vec![1;16])),
-                    ("capabilities", Value::Array(vec![s("session-termination-confirmed")]))])),
+                    ("capabilities", Value::Array(vec![s("owner-authorized-resume-v1"), s("session-termination-confirmed")]))])),
                 message("TerminateAccepted", map(vec![("session_id", s(&state.id.to_string()))])),
                 message(reply, body),
             ]) };
             assert_eq!(terminate(&mut link, &state).unwrap(), expected);
         }
         let mut changed = FakeLink { sent: vec![], received: VecDeque::from([
-            message("HelloOk", map(vec![("version", 1.into()), ("broker_instance_id", Value::Binary(vec![2;16]))])),
+            message("HelloOk", map(vec![("version", 1.into()), ("broker_instance_id", Value::Binary(vec![2;16])),
+                ("capabilities", Value::Array(vec![s("owner-authorized-resume-v1")]))])),
         ]) };
         assert_eq!(terminate(&mut changed, &state).unwrap(), Termination::Retired(RetirementReason::BrokerChanged));
         assert_eq!(changed.sent.len(), 1);
