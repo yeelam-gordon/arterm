@@ -166,7 +166,7 @@ current authorized host inventory and `--json` for structured output.
 Known-ended or authoritatively stale entries are retired from the session
 inventory. Only the identity guard needed for safe old-GUID handling remains.
 Reusing a retired name atomically publishes fresh session data, not the old
-credential or broker binding.
+recovery state or broker binding.
 
 `send` waits for a safe prompt for up to **30 seconds** by default, then returns
 a command ID and acceptance, not proof of success. `--timeout 5s` overrides this
@@ -272,19 +272,51 @@ and only when their command matches the owned installed executable.
 
 References contain 1..64 ASCII letters, digits, `_`, or `-`, beginning with a
 letter or digit. Names are case-insensitive (`MyWork` equals `mywork`); GUIDs
-use canonical hyphenated form. References are scoped to the registered target
-identity and current Windows user. They are not portable credentials.
+use canonical hyphenated form. Session aliases are canonical on the host, scoped
+to its Windows owner, Windows session, and data root. Local mappings are identity
+caches, not the authority for a name. Neither aliases nor GUIDs are credentials.
 
 The host owns a persistent ConPTY and drains output while detached. Retries
-reuse the same internal GUID and creation request. Saved authorization uses
-random credentials protected by Windows DPAPI, never secrets derived from names.
-Repeat `arterm connect my-devbox MyWork` to recover it; saved legacy GUID
-references remain supported by `connect`.
+reuse the same internal GUID and immutable creation request fingerprint. No
+per-session resume token or create claim is issued or persisted. The authenticated
+GitHub tunnel launches the bridge as the host owner; the local host pipe enforces
+its Windows owner ACL, rejects remote pipe clients, and checks the Windows session.
+Capability negotiation is not authentication. This boundary does not isolate
+arbitrary code already running as the host owner.
 
-Mapping and protected state are persisted before remote creation. Exclusive
+`arterm resume my-devbox MyWork` (or a GUID) is existing-only, including on a fresh
+authorized client with no recovery files. `connect` attaches an existing host alias
+or creates an absent alias; GUIDs are always existing-only. An ended name can be
+explicitly reused with `connect`, but an old GUID never revives. A saved alias pins
+its old GUID and will not silently follow a name reused by another client; use the
+new GUID explicitly. Host inventory includes canonical aliases.
+
+Fresh lookups complete before publishing local recovery state. Failed lookups and
+missing existing-only lookups do not reserve local references. Creation state is persisted before remote
+creation. Exclusive
 locks prevent concurrent local use from creating duplicate sessions. Missing,
 corrupt, incomplete, expired, or unauthorized recovery records fail closed.
 Do not delete them to troubleshoot a connection.
+For a host-confirmed existing session, the GUID record is saved before claiming a
+local alias. An alias conflict can leave that usable GUID unnamed, but cannot
+replace another alias binding or strand the GUID without recovery state.
+
+Read-only host resolution honors `--retries` with the same bounded backoff as
+attachment reconnects. Transient connection/timeout failures can retry;
+authentication and protocol rejection are terminal.
+
+Until creation is confirmed, printed recovery guidance retries `connect` with the
+saved name and original creation identity. Once confirmed, guidance switches to
+existing-only `resume` with the GUID; it is recomputed from current recovery state.
+
+Protected schema-2 state records explicit create-pending, attach-only, or attached
+intent, independently of authentication. Valid schema-1 records migrate without
+their obsolete token/claim; unsafe or missing broker bindings fail closed. Broker
+restart never rebinds old state or replays uncertain input. DPAPI still protects
+pending input and recovery writes. Input acknowledgments and epochs are per client;
+the host retains up to 1024 client replay guards per live session and rejects new
+identities at capacity rather than evicting guards. A live writer blocks other
+clients; file transfer requires its current attachment, lease, epoch and broker.
 
 Repeating original `--shell` and `--cwd` values is supported when they exactly
 match saved creation values. Incompatible overrides fail. `--retries` controls
@@ -387,22 +419,19 @@ canonical and legacy runtime filenames and do not bypass live-session guards
 when only an old executable name exists. Older DevBox Remote prototype state
 is left untouched and is not automatically imported.
 
-Reusable `connect` requires the host capability
-`ended-session-rejection`, supplied by arTerm and compatible VsTerm 0.3 hosts.
-Unsupported hosts are rejected before creation or attachment. The local
-reservation remains available for retry with a compatible host; protocol
-version 1 alone does not establish support.
+Version **0.8.0 requires upgrading both client and host**. Finish existing sessions
+with the matching older client before upgrading/restarting their host: broker
+restart does not preserve the running shells or permit rebinding old recovery state.
 
-For a still-live VsTerm 0.2 session, `connect` with its saved GUID
-can use an existing unnamed record with a saved credential. This legacy path
-warns that an old host may replay a retained exited session and return its old
-exit code instead of rejecting it as already ended. It never creates a
-replacement. A named record's GUID does not bypass capability negotiation.
+`connect` and `resume` require `owner-authorized-resume-v1` and
+`ended-session-rejection`. Unsupported hosts fail before session mutation;
+new hosts reject clients without owner-resume negotiation. There is no legacy
+credential fallback. Protocol version 1 alone does not establish compatibility.
 
-Tokenless creation recovery on a 0.2 host still requires the matching 0.2 client.
+Existing old-host sessions require their matching old client.
 Finish legacy sessions before upgrading their host; restarting the broker does
 not preserve running shells. A failed `terminate` lookup of an unused GUID does
-not reserve it or prevent its later first `connect`. Existing remote sessions
+not reserve it. GUIDs cannot be used for first creation. Existing remote sessions
 do not gain the new in-memory command adapter when a client reconnects.
 
 </details>

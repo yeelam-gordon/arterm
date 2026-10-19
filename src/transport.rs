@@ -1,4 +1,6 @@
 use crate::wire::{self, binary, get, map, num, s, text, Frames};
+#[path = "vendor_process.rs"]
+mod vendor_process;
 use crate::statusln as eprintln;
 use anyhow::{bail, ensure, Context, Result};
 use rmpv::Value;
@@ -154,6 +156,19 @@ impl std::fmt::Display for LoginRequired {
 }
 impl std::error::Error for LoginRequired {}
 
+pub fn retryable_connection_error(error: &anyhow::Error) -> bool {
+    if error.is::<LoginRequired>() || error.is::<AuthenticationRejected>() { return false; }
+    error.chain().any(|cause| {
+        cause.downcast_ref::<std::io::Error>().is_some_and(|error| matches!(error.kind(),
+            std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::NotConnected
+            | std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::Interrupted
+            | std::io::ErrorKind::WouldBlock))
+            || cause.is::<RecvTimeoutError>()
+    })
+}
+
 #[derive(Debug)]
 struct AuthenticationRejected;
 impl std::fmt::Display for AuthenticationRejected {
@@ -232,6 +247,7 @@ impl Forward {
         let mut forward = Self { child, _lock: lock };
         let mut candidates = BTreeMap::new();
         let mut probe_errors = BTreeMap::new();
+        let mut terminal_probe_error = None;
         while Instant::now() < deadline {
             let mut lines = Vec::new();
             match rx.recv_timeout(Duration::from_millis(100)) {
@@ -287,13 +303,16 @@ impl Forward {
                             eprintln!("[client] Control probe {addr}: {diagnostic}");
                             probe_errors.insert(port, diagnostic);
                         }
+                        if !retryable_connection_error(&error) { terminal_probe_error = Some(error); }
                         candidates.insert(port, Instant::now() + Duration::from_secs(5));
                     }
                 }
             }
         }
-        bail!("devtunnel did not expose a compatible control port within {} seconds; {} candidate(s) examined",
-            timeout.as_secs_f64(), probe_errors.len())
+        let detail = format!("devtunnel did not expose a compatible control port within {} seconds; {} candidate(s) examined",
+            timeout.as_secs_f64(), probe_errors.len());
+        if let Some(error) = terminal_probe_error { return Err(error).context(detail); }
+        Err(std::io::Error::new(std::io::ErrorKind::TimedOut, detail).into())
     }
 }
 impl Drop for Forward {
@@ -338,7 +357,9 @@ struct Captured {
 fn remaining(deadline: Instant) -> Result<Duration> {
     deadline
         .checked_duration_since(Instant::now())
-        .context("devtunnel metadata/startup timed out")
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::TimedOut,
+            "devtunnel metadata/startup timed out").into())
 }
 
 fn read_bounded(mut reader: impl Read, limit: usize) -> std::io::Result<(Vec<u8>, bool)> {
@@ -398,10 +419,9 @@ fn capture_bounded(mut command: Command, timeout: Duration, limit: usize) -> Res
 
         if Instant::now() >= deadline {
             kill_owned_process_tree(&mut child);
-            bail!(
-                "devtunnel metadata command timed out after {} seconds",
-                timeout.as_secs_f32()
-            );
+            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut,
+                format!("devtunnel metadata command timed out after {} seconds",
+                    timeout.as_secs_f32())).into());
         }
         thread::sleep(Duration::from_millis(25));
     };
@@ -417,6 +437,30 @@ fn capture_bounded(mut command: Command, timeout: Duration, limit: usize) -> Res
         stderr: stderr.0,
         truncated: stdout.1 || stderr.1,
     })
+}
+
+fn capture_vendor(program: &Path, args: &[&str], timeout: Duration, limit: usize, hidden: bool) -> Result<Captured> {
+    let mut child = vendor_process::VendorProcess::spawn(program, args, hidden)?;
+    let stdout = child.stdout.take().context("vendor stdout")?;
+    let stderr = child.stderr.take().context("vendor stderr")?;
+    let (out_tx, out_rx) = mpsc::sync_channel(1);
+    let (err_tx, err_rx) = mpsc::sync_channel(1);
+    thread::spawn(move || { let _ = out_tx.send(read_bounded(stdout, limit)); });
+    thread::spawn(move || { let _ = err_tx.send(read_bounded(stderr, limit)); });
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child.try_wait()? { break status; }
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut,
+                format!("devtunnel metadata command timed out after {} seconds", timeout.as_secs_f32())).into());
+        }
+        thread::sleep(Duration::from_millis(25));
+    };
+    let stdout = out_rx.recv_timeout(remaining(deadline)?)
+        .context("devtunnel metadata stdout did not close before timeout")??;
+    let stderr = err_rx.recv_timeout(remaining(deadline)?)
+        .context("devtunnel metadata stderr did not close before timeout")??;
+    Ok(Captured { status, stdout: stdout.0, stderr: stderr.0, truncated: stdout.1 || stderr.1 })
 }
 
 pub fn output_bounded(command: Command, timeout: Duration) -> Result<std::process::Output> {
@@ -536,9 +580,7 @@ mod discovery_tests {
 }
 
 fn metadata(devtunnel: &Path, args: &[&str], deadline: Instant) -> Result<Captured> {
-    let mut command = Command::new(devtunnel);
-    command.args(args);
-    capture_bounded(command, remaining(deadline)?, 4 * 1024 * 1024)
+    capture_vendor(devtunnel, args, remaining(deadline)?, 4 * 1024 * 1024, false)
 }
 
 fn authentication_failure_text(text: &str) -> bool {
@@ -816,11 +858,8 @@ impl Authentication {
                 "automatic devtunnel sign-in already attempted"
             );
             let attempt = (|| -> Result<()> {
-                let mut login = Command::new(devtunnel);
-                login
-                    .creation_flags(CREATE_NO_WINDOW)
-                    .args(["user", "login", "--github"]);
-                let output = capture_bounded(login, remaining(deadline)?, 64 * 1024)?;
+                let output = capture_vendor(devtunnel, &["user", "login", "--github"],
+                    remaining(deadline)?, 64 * 1024, true)?;
                 ensure!(
                     output.status.success(),
                     "automatic devtunnel sign-in exited unsuccessfully"
@@ -1339,8 +1378,31 @@ mod tests {
         sleeper.args(["--exact", "transport::tests::metadata_child", "--nocapture"]);
         sleeper.env("VSTERM_METADATA_CHILD", "sleep");
         let started = Instant::now();
-        assert!(capture_bounded(sleeper, Duration::from_millis(150), 1024).is_err());
+        let error = capture_bounded(sleeper, Duration::from_millis(150), 1024).err().expect("metadata command must time out");
+        assert_eq!(error.downcast_ref::<std::io::Error>().map(std::io::Error::kind),
+            Some(std::io::ErrorKind::TimedOut));
+        assert!(retryable_connection_error(&error));
+        let expired = remaining(Instant::now() - Duration::from_millis(1)).unwrap_err();
+        assert_eq!(expired.downcast_ref::<std::io::Error>().map(std::io::Error::kind),
+            Some(std::io::ErrorKind::TimedOut));
+        assert!(retryable_connection_error(&expired));
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn owned_vendor_preserves_native_arguments_and_spaced_executable_paths() {
+        let root = std::env::temp_dir().join(format!("vendor args {}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&root).unwrap();
+        let program = root.join("vendor with spaces.exe");
+        let built = Command::new("rustc").args(["--edition=2021", "tests\\fixtures\\auth_vendor.rs", "-o"])
+            .arg(&program).output().unwrap();
+        assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+        fs::write(root.join("mode"), "arguments").unwrap();
+        let args = ["", "with spaces", "embedded\"quote", r"trailing\", r#"slash\"quote"#, "日本語"];
+        let output = capture_vendor(&program, &args, Duration::from_secs(5), 4096, true).unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), format!("{args:?}"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

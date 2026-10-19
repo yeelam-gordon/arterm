@@ -53,6 +53,7 @@ Usage:\n\
   arterm list [--json]\n\
   arterm remove ALIAS\n\
   arterm connect ALIAS [REF] [--shell EXE] [--cwd PATH] [--retries 0..20] [--timeout 60s]\n\
+  arterm resume ALIAS REF [--retries 0..20] [--timeout 60s]\n\
   arterm list --client [--json] | list --server MACHINE [--json] [--timeout 60s]\n\
   arterm send MACHINE SESSION --command TEXT [--command-id UUID] [--timeout 60s] [--wait] [--json]\n\
   arterm send MACHINE SESSION --file LOCALPATH [--json]\n\
@@ -69,6 +70,7 @@ Offline, disconnected, and unconfirmed references are retained; remote existence
 Connecting a retired session name creates fresh identity/state; an old GUID never resolves to its replacement.\n\
 Use list --server MACHINE for current authorized remote inventory, including detached running sessions.\n\
 Without REF, connect only prints a reusable command. Names are not passwords.\n\
+Host aliases are canonical; resume and GUID lookup never create. Fresh authorized clients need no copied recovery files.\n\
 Tunnel startup defaults to 60s per attempt; connect, doctor ALIAS, list --server and terminate accept --timeout in positive whole seconds (e.g. 120s).\n\
 This covers authentication checks, discovery and control-port readiness, not the session lifetime, host handshake or interactive sign-in recovery.\n\
 Control commands print readable results by default; use --json for structured automation output.\n\
@@ -267,13 +269,13 @@ fn probe_retirement(config: &ClientConfig, target: &Target, address: Option<&str
 
 fn terminate_remote(config: &ClientConfig, target: &Target, address: Option<&str>, timeout: Duration,
     state: &store::State) -> Result<client_protocol::Termination> {
-    if state.token.is_none() {
+    if state.mode == store::SessionMode::CreatePending {
         if state.ended {
             if let Ok(Some(reason)) = probe_retirement(config, target, address, timeout, state) {
                 return Ok(client_protocol::Termination::Retired(reason));
             }
         }
-        bail!("no saved resume credential; remote existence remains unknown and reference was retained");
+        bail!("creation not confirmed; remote existence remains unknown and reference was retained");
     }
     ensure!(state.origin.is_some(), "no saved broker identity; reference retained");
     let outcome = {
@@ -283,7 +285,7 @@ fn terminate_remote(config: &ClientConfig, target: &Target, address: Option<&str
     if outcome != client_protocol::Termination::Rejected { return Ok(outcome); }
     match probe_retirement(config, target, address, timeout, state) {
         Ok(Some(reason)) => Ok(client_protocol::Termination::Retired(reason)),
-        _ => bail!("saved session credential rejected; remote existence remains unconfirmed and reference was retained"),
+        _ => bail!("saved session identity rejected; remote existence remains unconfirmed and reference was retained"),
     }
 }
 
@@ -313,8 +315,7 @@ fn already_retired(id: Uuid, reason: store::RetirementReason) -> serde_json::Val
 #[test]
 fn accepted_unconfirmed_rejects_contradictory_exit_flags_without_mutation_or_completion() {
     let mut state = store::State::new("fixture".into(), "powershell.exe".into(), vec![], None);
-    state.claim = store::random_claim().unwrap();
-    state.token = Some(vec![9; 32]);
+    state.mode = store::SessionMode::Attached;
     state.origin = Some(vec![7; 16]);
     state.exit_confirmed = Some(true);
     let before = serde_json::to_vec(&state).unwrap();
@@ -349,12 +350,12 @@ fn quote_command_arg(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
-fn session_command(alias: &str, reference: &SessionReference, retries: u32, flags: &ConnectionFlags, _create: bool) -> Result<String> {
+fn session_command(alias: &str, reference: &SessionReference, retries: u32, flags: &ConnectionFlags, create: bool) -> Result<String> {
     let exe = std::env::current_exe()?;
     let mut parts = vec![
         "&".into(),
         quote_command_arg(&exe.to_string_lossy()),
-        "connect".into(),
+        if create { "connect".into() } else { "resume".into() },
         quote_command_arg(alias),
         reference.as_str().to_owned(),
         "--retries".into(),
@@ -383,6 +384,29 @@ fn print_recovery(id: Uuid, command: &str) {
     eprintln!("[session] Resume command: {command}");
 }
 
+fn print_session_recovery(alias: &str, state: &store::State, retries: u32, flags: &ConnectionFlags) -> Result<()> {
+    let pending_name = (state.mode == store::SessionMode::CreatePending)
+        .then_some(state.reference.as_deref()).flatten();
+    let reference = SessionReference::parse(pending_name.unwrap_or(&state.id.to_string()))?;
+    let command = session_command(alias, &reference, retries, flags, pending_name.is_some())?;
+    print_recovery(state.id, &command);
+    if state.mode == store::SessionMode::CreatePending && pending_name.is_none() {
+        eprintln!("[session] Pending creation has no saved name; GUID recovery can only attach an existing host session.");
+    }
+    Ok(())
+}
+
+fn pause_before_retry(attempt: u32, message: &str, cancelled: impl Fn() -> bool) -> Result<bool> {
+    let jitter = u16::from_le_bytes(store::random_claim()?[..2].try_into().unwrap()) as u64 % 251;
+    let delay = (500u64 * (1u64 << (attempt - 1).min(6))).min(15_000) + jitter;
+    eprintln!("[session] {message} in {delay}ms");
+    for _ in 0..(delay / 25 + 1) {
+        if cancelled() { return Ok(false); }
+        thread::sleep(Duration::from_millis(25));
+    }
+    Ok(true)
+}
+
 const ATTACHMENT_LOST_MESSAGE: &str =
     "[session] Attachment lost; this client did not request termination. Remote session state is unknown.";
 
@@ -403,13 +427,25 @@ fn run_session(
     create: bool,
     flags: ConnectionFlags,
 ) -> Result<u32> {
-    let console = Console::new(flags.stdio)?;
+    let interactive = Console::is_terminal();
+    if !flags.stdio && !interactive { arterm::diagnostics::nonblocking(); }
     let config = client_config::load(root)?;
     let target = client_config::target(&config, alias)?.clone();
     let retries = flags.retries.unwrap_or(DEFAULT_RETRIES);
     let timeout = flags.connection_timeout();
     let state_dir = client_config::state_dir(root, &target);
-    let (store, state) = match Store::resolve(&state_dir, &target.target_id, reference, create, flags.shell.as_deref(), flags.cwd.as_deref()) {
+    let (store, state) = match Store::resolve_with_host(&state_dir, &target.target_id, reference, create,
+        flags.shell.as_deref(), flags.cwd.as_deref(), &mut |reference| {
+            eprintln!("[session] Resolving host reference {} before terminal attachment.{}",
+                reference.as_str(), if interactive { " Ctrl+C cancels lookup." } else { "" });
+            client_protocol::retry_lookup(retries, || {
+                let mut link = connect_link(&config, &target, flags.address.as_deref(), timeout)?;
+                client_protocol::resolve_session(&mut link, &target.target_id, reference)
+            }, |attempt| {
+                pause_before_retry(attempt, &format!("Resolving host session {attempt}/{retries}"), || false)?;
+                Ok(())
+            })
+        }) {
         Ok(resolved) => resolved,
         Err(error) if error.is::<store::RecoveryBlocked>() => {
             let (store, state) = Store::resolve_for_management(&state_dir, &target.target_id, reference)?;
@@ -426,21 +462,16 @@ fn run_session(
     let store = std::sync::Arc::new(store);
     let service_store = store.clone();
     let id = state.id;
-    let command = session_command(alias, reference, retries, &flags, create)?;
     eprintln!("[session] GUID {id}; Ctrl+] detaches without killing the remote shell.");
-    print_recovery(id, &command);
+    print_session_recovery(alias, &state, retries, &flags)?;
     let mut owner = Owner::start(root, &target.target_id, alias, id, state.reference.clone())?;
+    let console = Console::new(flags.stdio)?;
     let snapshot = std::sync::Arc::new(std::sync::Mutex::new(state.clone()));
     let service_snapshot = snapshot.clone();
     let service_config = config.clone();
     let service_target = target.clone();
     let service_address = flags.address.clone();
-    let mut engine = if Uuid::parse_str(reference.as_str()).is_ok()
-        && state.reference.is_none() && state.token.is_some() {
-        Engine::resume_guid(state)
-    } else {
-        Engine::new(state)
-    };
+    let mut engine = Engine::new(state);
     let admission = engine.transfer_admission();
     let files = std::sync::Mutex::new(file_protocol::Files::default());
     owner.set_service(std::sync::Arc::new(move |operation_id, action, check| {
@@ -450,7 +481,7 @@ fn run_session(
         } else {
             ensure!(!state.ended, "session has ended or its recovery is blocked");
         }
-        ensure!(state.token.is_some(), "session is not authorized");
+        ensure!(state.mode == store::SessionMode::Attached, "session is not attached");
         check()?;
         if matches!(action, Operation::FileSend { .. } | Operation::FileReceive { .. }) {
             let ticket = admission.ticket().context("file transfer unsupported or attachment unavailable")?;
@@ -474,21 +505,14 @@ fn run_session(
             if attempt > 0 {
                 owner.set_state("reconnecting");
                 terminal.reading(false);
-                let jitter = u16::from_le_bytes(store::random_claim()?[..2].try_into().unwrap())
-                    as u64
-                    % 251;
-                let delay = (500u64 * (1u64 << (attempt - 1).min(6))).min(15_000) + jitter;
-                eprintln!("[session] Reconnecting {attempt}/{retries} in {delay}ms; reusing {id}");
-                for _ in 0..(delay / 25 + 1) {
-                    if owner.detached() { return Ok(0); }
-                    thread::sleep(Duration::from_millis(25));
-                }
+                if !pause_before_retry(attempt, &format!("Reconnecting {attempt}/{retries}; reusing {id}"),
+                    || owner.detached())? { return Ok(0); }
             }
             let mut link = match connect_link(&config, &target, flags.address.as_deref(), timeout) {
                 Ok(link) => link,
                 Err(error) => {
                     eprintln!("[session] Connection failed: {error:#}");
-                    print_recovery(id, &command);
+                    print_session_recovery(alias, &engine.state, retries, &flags)?;
                     if error.is::<LoginRequired>() {
                         owner.set_state("auth_required");
                         return Err(error);
@@ -500,8 +524,11 @@ fn run_session(
                 let mut snapshot = snapshot.lock().unwrap();
                 let mut updated = state.clone();
                 updated.merge_ended(&snapshot)?;
+                let creation_confirmed = snapshot.mode == store::SessionMode::CreatePending
+                    && updated.mode == store::SessionMode::Attached && !updated.ended;
                 store.save(&updated)?;
                 *snapshot = updated;
+                if creation_confirmed { print_session_recovery(alias, &snapshot, retries, &flags)?; }
                 Ok(())
             });
             let end = match end {
@@ -528,7 +555,7 @@ fn run_session(
                     owner.set_state("reconnecting");
                     terminal.reading(false);
                     eprintln!("{ATTACHMENT_LOST_MESSAGE}");
-                    print_recovery(id, &command);
+                    print_session_recovery(alias, &engine.state, retries, &flags)?;
                 }
             }
         }
@@ -538,7 +565,7 @@ fn run_session(
     drop(terminal);
     if result.is_err() {
         eprintln!("[session] Automatic recovery stopped. The saved GUID does not guarantee the remote session is still alive.");
-        print_recovery(id, &command);
+        print_session_recovery(alias, &engine.state, retries, &flags)?;
     }
     result
 }
@@ -830,15 +857,17 @@ fn command(args: &[String]) -> Result<u32> {
             remove_target(&root, &args[1..])?;
             Ok(0)
         }
-        Some("connect") => {
+        Some("connect" | "resume") => {
+            let create = args[0] == "connect";
             let alias = args.get(1).context("connect requires an alias")?;
             client_config::validate_alias(alias)?;
             let reference = args.get(2).filter(|value| !value.starts_with("--"));
             let flags = parse_connection_flags(&args[if reference.is_some() { 3 } else { 2 }..], true)?;
             if let Some(reference) = reference {
-                run_session(&root, alias, &SessionReference::parse(reference)?, true, flags)
+                run_session(&root, alias, &SessionReference::parse(reference)?, create, flags)
             } else {
-                let reference = SessionReference::parse(&Uuid::now_v7().to_string())?;
+                ensure!(create, "resume requires an existing host GUID or alias");
+                let reference = SessionReference::parse(&format!("session-{}", Uuid::now_v7()))?;
                 println!("{}", session_command(alias, &reference, flags.retries.unwrap_or(DEFAULT_RETRIES), &flags, true)?);
                 Ok(0)
             }

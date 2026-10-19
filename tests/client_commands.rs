@@ -282,6 +282,10 @@ fn automation_output_defaults_to_human_and_json_is_explicit() {
 fn headless_failure_preserves_final_error_with_drained_stderr() {
     let home = std::env::temp_dir().join(format!("arterm-diagnostics-{}", Uuid::now_v7()));
     assert!(run(&home, &["add", "work", "--tunnel", "fixture", "--host-path", r"C:\host.exe"]).status.success());
+    let config = arterm::client_config::load(&home).unwrap();
+    let target = &config.targets["work"];
+    drop(arterm::store::Store::resolve(&arterm::client_config::state_dir(&home, target),
+        &target.target_id, &arterm::store::SessionReference::parse("errorprobe").unwrap(), true, None, None).unwrap());
     for _ in 0..30 {
         let output = run(&home, &["connect", "work", "errorprobe", "--retries", "0"]);
         assert_eq!(output.status.code(), Some(1));
@@ -297,6 +301,10 @@ fn identical_unsigned_production_clients_cannot_start_ipc() {
     let home = std::env::temp_dir().join(format!("arterm-strict-unsigned-{}", Uuid::now_v7()));
     fs::create_dir_all(&home).unwrap();
     assert!(run(&home, &["add","work","--tunnel","fixture","--host-path",r"C:\host.exe"]).status.success());
+    let config = arterm::client_config::load(&home).unwrap();
+    let target = &config.targets["work"];
+    drop(arterm::store::Store::resolve(&arterm::client_config::state_dir(&home, target),
+        &target.target_id, &arterm::store::SessionReference::parse("probe").unwrap(), true, None, None).unwrap());
     let first = home.join("owner.exe");
     let second = home.join("controller.exe");
     fs::copy(env!("CARGO_BIN_EXE_arterm"), &first).unwrap();
@@ -345,7 +353,7 @@ fn registration_persists_the_friendly_name_not_a_generated_tunnel_id() {
 
 #[test]
 #[cfg_attr(not(feature = "test-unsigned-ipc"), ignore = "requires explicit unsigned functional fixture feature")]
-fn failed_retries_keep_one_persisted_guid() {
+fn fresh_lookup_failure_never_persists_a_phantom_guid() {
     let home = std::env::temp_dir().join(format!("devbox-client-retry-{}", Uuid::now_v7()));
     fs::create_dir_all(&home).unwrap();
     let host = std::env::current_exe().unwrap();
@@ -389,10 +397,7 @@ fn failed_retries_keep_one_persisted_guid() {
         .lines()
         .filter_map(|line| line.strip_prefix("[session] Resume GUID: "))
         .collect::<Vec<_>>();
-    assert_eq!(ids.len(), 4, "{stderr}");
-    assert!(ids.iter().all(|id| *id == ids[0]));
-    Uuid::parse_str(ids[0]).unwrap();
-    assert!(stderr.contains("connect 'work' mywork"));
+    assert!(ids.is_empty(), "unresolved host alias must not publish a phantom GUID: {stderr}");
     let records = walk(&home)
         .into_iter()
         .filter(|path| {
@@ -400,7 +405,7 @@ fn failed_retries_keep_one_persisted_guid() {
                 .is_some_and(|ext| ext.eq_ignore_ascii_case("dpapi"))
         })
         .count();
-    assert_eq!(records, 1);
+    assert_eq!(records, 0);
     fs::remove_dir_all(home).unwrap();
 }
 
@@ -428,7 +433,7 @@ fn no_reference_only_prints_a_powershell_safe_command_and_preserves_flags() {
 
 #[test]
 #[cfg_attr(not(feature = "test-unsigned-ipc"), ignore = "requires explicit unsigned functional fixture feature")]
-fn unused_guid_lookup_does_not_consume_printed_reference() {
+fn failed_lookup_does_not_consume_printed_alias() {
     let home = std::env::temp_dir().join(format!("arterm-unused-guid-{}", Uuid::now_v7()));
     assert!(run(&home, &["add", "work", "--tunnel", "fixture",
         "--host-path", r"C:\Tools\arterm-host.exe"]).status.success());
@@ -439,7 +444,7 @@ fn unused_guid_lookup_does_not_consume_printed_reference() {
         let printed = run(&home, &["connect", "work"]);
         assert!(printed.status.success());
         let command = String::from_utf8(printed.stdout).unwrap();
-        let id = command.split_whitespace().find(|part| Uuid::parse_str(part).is_ok()).unwrap();
+        let id = command.split_whitespace().find(|part| part.starts_with("session-")).unwrap();
         let args = vec![verb, "work", id, "--address", &address, "--stdio"];
         assert!(!run(&home, &args).status.success());
         assert!(!walk(&home).iter().any(|path|
@@ -449,9 +454,9 @@ fn unused_guid_lookup_does_not_consume_printed_reference() {
             "--stdio", "--retries", "0"]);
         assert!(!created.status.success(), "fixture address must be unavailable");
         let error = String::from_utf8_lossy(&created.stderr);
-        assert!(error.contains("Connection failed:"), "{error}");
-        assert!(walk(&home).iter().any(|path|
-            path.file_name().unwrap().to_string_lossy() == format!("{id}.dpapi")));
+        assert!(error.contains("[client]"), "{error}");
+        assert!(!walk(&home).iter().any(|path|
+            path.extension().is_some_and(|extension| extension == "dpapi")));
     }
     fs::remove_dir_all(home).unwrap();
 }

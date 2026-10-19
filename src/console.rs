@@ -269,13 +269,16 @@ pub struct Console {
     read_started: AtomicBool,
 }
 impl Console {
-    pub fn new(stdio: bool) -> Result<Self> {
+    pub fn is_terminal() -> bool {
         let mut mode = 0;
-        let interactive = unsafe {
+        unsafe {
             GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &mut mode) != 0
                 && GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), &mut mode) != 0
-        };
-        let headless = !stdio && !interactive;
+        }
+    }
+
+    pub fn new(stdio: bool) -> Result<Self> {
+        let headless = !stdio && !Self::is_terminal();
         if headless { crate::diagnostics::nonblocking(); }
         let guard = if stdio || headless { None } else { Some(Guard::new()?) };
         let (tx, input) = mpsc::sync_channel(1);

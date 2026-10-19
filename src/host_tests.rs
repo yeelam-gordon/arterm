@@ -120,13 +120,12 @@ impl Link {
         binary(get(&v, "body").unwrap(), "broker_instance_id").unwrap()
     }
 }
-fn create(request: Uuid, id: Uuid, claim: &[u8], broker: &[u8]) -> Value {
+fn create(request: Uuid, id: Uuid, broker: &[u8]) -> Value {
     message(
         "CreateSession",
         map(vec![
             ("request_id", Value::Binary(request.as_bytes().to_vec())),
             ("requested_session_id", s(&id.to_string())),
-            ("create_claim", Value::Binary(claim.to_vec())),
             ("origin_broker_instance_id", Value::Binary(broker.to_vec())),
             ("connection_epoch", 1.into()),
             ("shell", s("powershell.exe")),
@@ -248,19 +247,19 @@ fn real_conpty_pid_and_state_survive_pipe_disconnect() {
     let id = Uuid::now_v7();
     let request = Uuid::now_v7();
     let client = Uuid::now_v7().as_bytes().to_vec();
-    let claim = vec![9; 32];
     let mut one = Link::connect(&root);
     let broker = one.hello(&client);
-    one.send(create(request, id, &claim, &broker));
+    one.send(create(request, id, &broker));
     let made = one.recv();
     assert_eq!(text(&made, "type").unwrap(), "SessionCreated");
     let body = get(&made, "body").unwrap();
-    let token = binary(body, "resume_token").unwrap();
+    assert!(get(body, "resume_token").is_err());
     let attach = binary(body, "attachment_id").unwrap();
     let lease = binary(body, "lease_id").unwrap();
     // Simulate a quiet/cold shell for longer than the production watchdog.
     // The test peer must maintain liveness; increasing the watchdog would hide this bug.
-    let quiet_command = format!("Start-Sleep -Seconds {}; $global:KeepMe='resumable'; Write-Output ('FIRST=' + $PID + ':' + $global:KeepMe)\r\n",
+    // Match a terminal Enter; LF is a separate PSReadLine editing key.
+    let quiet_command = format!("Start-Sleep -Seconds {}; $global:KeepMe='resumable'; Write-Output ('FIRST=' + $PID + ':' + $global:KeepMe)\r",
         PEER_IDLE_TIMEOUT.as_secs() + 1);
     let quiet_started = Instant::now();
     one.send(input(
@@ -280,7 +279,7 @@ fn real_conpty_pid_and_state_survive_pipe_disconnect() {
     drop(one);
     let mut two = Link::connect(&root);
     assert_eq!(two.hello(&client), broker);
-    two.send(create(request, id, &claim, &broker));
+    two.send(create(request, id, &broker));
     let recovered = two.recv();
     assert_eq!(text(&recovered, "type").unwrap(), "SessionCreated");
     assert_eq!(
@@ -293,7 +292,6 @@ fn real_conpty_pid_and_state_survive_pipe_disconnect() {
         "AttachSession",
         map(vec![
             ("session_id", s(&id.to_string())),
-            ("resume_token", Value::Binary(token)),
             ("mode", s("writer")),
             ("takeover", false.into()),
             ("after_output_seq", cursor.into()),
@@ -316,7 +314,7 @@ fn real_conpty_pid_and_state_survive_pipe_disconnect() {
         &lease2,
         &client,
         2,
-        b"Write-Output ('SECOND=' + $PID + ':' + $global:KeepMe)\r\n",
+        b"Write-Output ('SECOND=' + $PID + ':' + $global:KeepMe)\r",
     ));
     let second = marker(&mut two, id, &mut cursor, ":resumable");
     assert!(second.contains(&format!("SECOND={shell_pid}:resumable")));
@@ -375,7 +373,6 @@ fn short_create(request: Uuid, id: Uuid, broker: &[u8]) -> Value {
         map(vec![
             ("request_id", Value::Binary(request.as_bytes().to_vec())),
             ("requested_session_id", s(&id.to_string())),
-            ("create_claim", Value::Binary(vec![3; 32])),
             ("origin_broker_instance_id", Value::Binary(broker.to_vec())),
             ("connection_epoch", 1.into()),
             ("shell", s("powershell.exe")),
@@ -448,7 +445,6 @@ fn live_create(request: Uuid, id: Uuid, broker: &[u8]) -> Value {
         map(vec![
             ("request_id", Value::Binary(request.as_bytes().to_vec())),
             ("requested_session_id", s(&id.to_string())),
-            ("create_claim", Value::Binary(vec![4; 32])),
             ("origin_broker_instance_id", Value::Binary(broker.to_vec())),
             ("connection_epoch", 1.into()),
             ("shell", s("powershell.exe")),

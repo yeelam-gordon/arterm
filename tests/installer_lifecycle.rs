@@ -351,6 +351,7 @@ fn live_legacy_host_blocks_upgrade_and_uninstall_without_replacing_files() {
     input.write_all(&wire::encode(&message("Hello", map(vec![
         ("min_version", 1.into()), ("max_version", 1.into()),
         ("client_instance_id", Value::Binary(vec![1; 16])),
+        ("capabilities", Value::Array(vec![s("owner-authorized-resume-v1")])),
     ]))).unwrap()).unwrap();
     let hello = rx.recv_timeout(Duration::from_secs(15)).unwrap();
     assert_eq!(text(&hello, "type").unwrap(), "HelloOk");
@@ -359,7 +360,6 @@ fn live_legacy_host_blocks_upgrade_and_uninstall_without_replacing_files() {
     input.write_all(&wire::encode(&message("CreateSession", map(vec![
         ("request_id", Value::Binary(uuid::Uuid::now_v7().as_bytes().to_vec())),
         ("requested_session_id", s(&id.to_string())),
-        ("create_claim", Value::Binary(vec![2; 32])),
         ("origin_broker_instance_id", Value::Binary(broker)),
         ("connection_epoch", 1.into()), ("shell", s("powershell.exe")),
         ("args", Value::Array(vec![s("-NoLogo"), s("-NoProfile")])),

@@ -231,7 +231,7 @@ pub fn server(inventory: &Value, json: bool) -> Result<String> {
         .iter()
         .map(|item| {
             vec![
-                text(&item["local_reference"]),
+                text(if item["alias"].is_string() { &item["alias"] } else { &item["local_reference"] }),
                 text(&item["id"]),
                 text(&item["pid"]),
                 text(&item["state"]),

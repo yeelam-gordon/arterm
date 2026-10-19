@@ -148,51 +148,24 @@ impl Fixture {
         }
     }
     pub(crate) fn client(&self, verb: &str, id: Option<&str>, addr: &str) -> RunningClient {
+        self.client_at_root(&self.home, verb, id, addr)
+    }
+    fn client_at_root(&self, root: &std::path::Path, verb: &str, id: Option<&str>, addr: &str) -> RunningClient {
         let mut command = Command::new(client_executable());
         command
-            .env("VSTERM_REMOTE_HOME", &self.home)
+            .env("VSTERM_REMOTE_HOME", root)
             .env("TEMP", &self.home).env("TMP", &self.home)
             .args([verb, "fixture"]);
         if let Some(id) = id {
             command.arg(id);
         } else if verb == "connect" {
-            command.arg(Uuid::now_v7().to_string());
+            command.arg(format!("session-{}", Uuid::now_v7()));
         }
         command.args(["--address", addr, "--stdio", "--retries", "2"]);
         if verb == "connect" {
             command.args(["--shell", &test_shell()]);
         }
-        let mut child = command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let input = child.stdin.take().unwrap();
-        let out = child.stdout.take().unwrap();
-        let err = child.stderr.take().unwrap();
-        let (tx, rx) = mpsc::channel();
-        for (stderr, mut reader) in [
-            (false, Box::new(out) as Box<dyn Read + Send>),
-            (true, Box::new(err) as Box<dyn Read + Send>),
-        ] {
-            let tx = tx.clone();
-            thread::spawn(move || {
-                let mut bytes = [0; 4096];
-                while let Ok(n) = reader.read(&mut bytes) {
-                    if n == 0 || tx.send((stderr, bytes[..n].to_vec())).is_err() {
-                        break;
-                    }
-                }
-            });
-        }
-        RunningClient {
-            child,
-            input,
-            rx,
-            out: String::new(),
-            err: String::new(),
-        }
+        RunningClient::spawn(command)
     }
 }
 impl Drop for Fixture {
@@ -216,6 +189,27 @@ pub(crate) struct RunningClient {
     err: String,
 }
 impl RunningClient {
+    fn spawn(mut command: Command) -> Self {
+        let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped())
+            .stderr(Stdio::piped()).spawn().unwrap();
+        let input = child.stdin.take().unwrap();
+        let out = child.stdout.take().unwrap();
+        let err = child.stderr.take().unwrap();
+        let (tx, rx) = mpsc::channel();
+        for (stderr, mut reader) in [
+            (false, Box::new(out) as Box<dyn Read + Send>),
+            (true, Box::new(err) as Box<dyn Read + Send>),
+        ] {
+            let tx = tx.clone();
+            thread::spawn(move || {
+                let mut bytes = [0; 4096];
+                while let Ok(n) = reader.read(&mut bytes) {
+                    if n == 0 || tx.send((stderr, bytes[..n].to_vec())).is_err() { break; }
+                }
+            });
+        }
+        Self { child, input, rx, out: String::new(), err: String::new() }
+    }
     pub(crate) fn wait_for(&mut self, predicate: impl Fn(&str, &str) -> bool) {
         let deadline = Instant::now() + Duration::from_secs(30);
         while !predicate(&self.out, &self.err) {
@@ -311,6 +305,8 @@ struct CreationGate {
     release: std::sync::atomic::AtomicBool,
     occurrence: usize,
     seen: std::sync::atomic::AtomicUsize,
+    reject_after_first: usize,
+    reject_first: usize,
     hide_file_capability: bool,
     hide_metadata_capability: bool,
     hide_directory_capability: bool,
@@ -327,14 +323,34 @@ fn relay_with_creation_gate(home: PathBuf, attachments: usize, trace: Option<Arc
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     let (tx, rx) = mpsc::channel();
+    listener.set_nonblocking(true).unwrap();
     thread::spawn(move || {
-        for _ in 0..attachments {
-            let (mut incoming, _) = listener.accept().unwrap();
+        let remaining = Arc::new(std::sync::atomic::AtomicUsize::new(attachments));
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let mut connection_attempt = 0;
+        while remaining.load(std::sync::atomic::Ordering::Acquire) > 0 && Instant::now() < deadline {
+            let (mut incoming, _) = match listener.accept() {
+                Ok(pair) => pair,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(error) => panic!("fixture accept: {error}"),
+            };
+            let reject = gate.as_ref().is_some_and(|gate| connection_attempt < gate.reject_first
+                || (connection_attempt > 0 && connection_attempt <= gate.reject_after_first));
+            connection_attempt += 1;
+            if reject {
+                incoming.shutdown(Shutdown::Both).unwrap();
+                continue;
+            }
+            let remaining = remaining.clone();
             let home = home.clone();
             let tx = tx.clone();
             let trace = trace.clone();
             let gate = gate.clone();
             thread::spawn(move || {
+            incoming.set_nonblocking(false).unwrap();
             incoming
                 .set_read_timeout(Some(Duration::from_secs(45)))
                 .unwrap();
@@ -351,7 +367,8 @@ fn relay_with_creation_gate(home: PathBuf, attachments: usize, trace: Option<Arc
                     ),
                 ]),
             );
-            let spawn = rmpv::decode::read_value(&mut incoming).unwrap();
+            // Forward discovery probes only the VS version, then closes.
+            let Ok(spawn) = rmpv::decode::read_value(&mut incoming) else { return; };
             assert_eq!(get(&spawn, "method").as_str(), Some("spawn"));
             let params = get(&spawn, "params");
             assert_eq!(
@@ -379,7 +396,6 @@ fn relay_with_creation_gate(home: PathBuf, attachments: usize, trace: Option<Arc
                     ),
                 ]),
             );
-            let _ = tx.send(incoming.try_clone().unwrap());
             let stdout = bridge.stdout.take().unwrap();
             let stderr = bridge.stderr.take().unwrap();
             for (id, mut reader) in [
@@ -493,13 +509,22 @@ fn relay_with_creation_gate(home: PathBuf, attachments: usize, trace: Option<Arc
             }
             let mut stdin = bridge.stdin.take().unwrap();
             let mut input_frames = arterm::wire::Frames::default();
+            let mut classified = false;
             while let Ok(value) = rmpv::decode::read_value(&mut incoming) {
                 let params = get(&value, "params");
                 match get(params, "segment") {
                     Value::Binary(bytes) => {
-                        if let Some(trace) = &trace {
-                            input_frames.push(bytes).unwrap();
-                            while let Some(frame) = input_frames.next().unwrap() {
+                        input_frames.push(bytes).unwrap();
+                        while let Some(frame) = input_frames.next().unwrap() {
+                            let kind = get(&frame, "type").as_str().unwrap();
+                            if !classified && kind != "Hello" {
+                                classified = true;
+                                if kind != "ResolveSession" {
+                                    remaining.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                                    let _ = tx.send(incoming.try_clone().unwrap());
+                                }
+                            }
+                            if let Some(trace) = &trace {
                                 if get(&frame, "type").as_str() == Some("Input") {
                                     let bytes = arterm::wire::binary(get(&frame, "body"), "bytes").unwrap();
                                     let mut trace = trace.lock().unwrap();
@@ -1599,7 +1624,7 @@ fn interactive_win32_keyup_preserves_command_readiness() {
     let fixture = Fixture::new();
     let trace = Arc::new(Mutex::new(SyntheticInputTrace::default()));
     let (address, _) = relay_traced(fixture.home.clone(), 2, Some(trace.clone()));
-    for reference in [Uuid::now_v7().to_string(), "interactive-named".into()] {
+    for reference in [format!("session-{}", Uuid::now_v7()), "interactive-named".into()] {
         *trace.lock().unwrap() = SyntheticInputTrace::default();
         let pair = native_pty_system().openpty(PtySize { rows: 40, cols: 120, pixel_width: 0, pixel_height: 0 }).unwrap();
         let quote = |value: &str| format!("'{}'", value.replace('\'', "''"));
@@ -1766,6 +1791,103 @@ fn interactive_win32_keyup_preserves_command_readiness() {
 
 #[test]
 #[ignore = "explicit functional fixture feature or trusted SIGNED_CLIENT/SIGNED_HOST required"]
+fn fresh_lookup_remains_interruptible_before_console_capture() {
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+    use std::sync::atomic::Ordering;
+    use windows_sys::Win32::{Foundation::{CloseHandle, HANDLE}, System::Threading::{
+        OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_TERMINATE,
+    }};
+    struct LoginHelper(HANDLE, u32);
+    impl Drop for LoginHelper {
+        fn drop(&mut self) {
+            unsafe {
+                if WaitForSingleObject(self.0, 0) != 0 {
+                    TerminateProcess(self.0, 1);
+                    WaitForSingleObject(self.0, 5000);
+                }
+                CloseHandle(self.0);
+            }
+        }
+    }
+    struct OwnedChild(Box<dyn portable_pty::Child + Send + Sync>);
+    impl Drop for OwnedChild {
+        fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
+    }
+    struct Release(Arc<CreationGate>);
+    impl Drop for Release {
+        fn drop(&mut self) { self.0.release.store(true, Ordering::Release); }
+    }
+    for hidden_login in [false, true] {
+    let fixture = Fixture::new();
+    if hidden_login {
+        let vendor = fixture.home.join("vendor.exe");
+        let built = Command::new("rustc").args(["--edition=2021", "tests\\fixtures\\auth_vendor.rs", "-o"])
+            .arg(&vendor).output().unwrap();
+        assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+        arterm::client_config::update(&fixture.home, |config| {
+            config.devtunnel_path = Some(vendor);
+            Ok(())
+        }).unwrap();
+        fs::write(fixture.home.join("mode"), "login_hang").unwrap();
+    }
+    let gate = Arc::new(CreationGate { frame: "HelloOk", ..CreationGate::default() });
+    let _release = Release(gate.clone());
+    let (address, _) = relay_with_creation_gate(fixture.home.clone(), 1, None, Some(gate.clone()));
+    let pair = native_pty_system().openpty(PtySize { rows: 30, cols: 100, pixel_width: 0, pixel_height: 0 }).unwrap();
+    let mut command = CommandBuilder::new(client_executable());
+    command.env("VSTERM_REMOTE_HOME", &fixture.home);
+    command.args(["resume", "fixture", "cancel-lookup", "--retries", "20"]);
+    if !hidden_login { command.args(["--address", &address]); }
+    let mut client = OwnedChild(pair.slave.spawn_command(command).unwrap());
+    drop(pair.slave);
+    let mut writer = pair.master.take_writer().unwrap();
+    let mut reader = pair.master.try_clone_reader().unwrap();
+    let (tx, rx) = mpsc::channel();
+    let output = thread::spawn(move || {
+        let mut bytes = [0; 4096];
+        while let Ok(n) = reader.read(&mut bytes) {
+            if n == 0 || tx.send(bytes[..n].to_vec()).is_err() { break; }
+        }
+    });
+    let mut received = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while if hidden_login { !fixture.home.join("login-pid").exists() } else { !gate.observed.load(Ordering::Acquire) } {
+        assert!(Instant::now() < deadline, "lookup not observed: {}", String::from_utf8_lossy(&received));
+        if let Ok(bytes) = rx.recv_timeout(Duration::from_millis(25)) { received.extend(bytes); }
+    }
+    let helper = hidden_login.then(|| {
+        let pid = fs::read_to_string(fixture.home.join("login-pid")).unwrap().parse().unwrap();
+        let handle = unsafe { OpenProcess(0x00100000 | PROCESS_TERMINATE, 0, pid) };
+        assert!(!handle.is_null(), "cannot pin test-owned login helper");
+        assert!(fs::read_to_string(fixture.home.join("calls")).unwrap().contains("login-hidden"));
+        LoginHelper(handle, pid)
+    });
+    writer.write_all(&[3]).unwrap();
+    writer.flush().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = client.0.try_wait().unwrap() {
+            assert!(!status.success(), "Ctrl+C must interrupt the still-blocked lookup");
+            break;
+        }
+        assert!(Instant::now() < deadline, "Ctrl+C did not interrupt lookup: {}", String::from_utf8_lossy(&received));
+        if let Ok(bytes) = rx.recv_timeout(Duration::from_millis(25)) { received.extend(bytes); }
+    }
+    assert!(!fixture.home.join("client").join("sessions").exists());
+    assert!(!fixture.home.join("client").join("active").exists());
+    gate.release.store(true, Ordering::Release);
+    drop(writer);
+    drop(pair.master);
+    output.join().unwrap();
+    if let Some(helper) = helper {
+        assert_eq!(unsafe { WaitForSingleObject(helper.0, 5000) }, 0,
+            "hidden login helper {} survived client Ctrl+C", helper.1);
+    }
+    }
+}
+
+#[test]
+#[ignore = "explicit functional fixture feature or trusted SIGNED_CLIENT/SIGNED_HOST required"]
 fn local_shell_accepts_command_after_detach_failure_and_remote_exit() {
     use portable_pty::{native_pty_system, CommandBuilder, PtySize};
     struct Shell(Box<dyn portable_pty::Child + Send + Sync>);
@@ -1792,7 +1914,7 @@ fn local_shell_accepts_command_after_detach_failure_and_remote_exit() {
         drop(pair.slave);
         let mut writer = pair.master.take_writer().unwrap();
         writer.write_all(format!(
-            "\"{}\" connect fixture {} --address {} --retries 0 --shell \"{}\" & echo CLIENT-EXIT=!errorlevel!\r",
+            "\"{}\" connect fixture session-{} --address {} --retries 0 --shell \"{}\" & echo CLIENT-EXIT=!errorlevel!\r",
             client_executable(), Uuid::now_v7(), endpoint, test_shell()).as_bytes()).unwrap();
         let mut reader = pair.master.try_clone_reader().unwrap();
         let (tx, rx) = mpsc::channel();
@@ -1863,7 +1985,7 @@ fn send_waits_for_readiness_and_never_runs_cancelled_or_expired_work() {
     impl Drop for Release { fn drop(&mut self) { self.0.release.store(true, Ordering::Release); } }
     for frame in ["HelloOk", "SessionCreated"] {
     let fixture = Fixture::new();
-    let gate = Arc::new(CreationGate { frame, ..CreationGate::default() });
+    let gate = Arc::new(CreationGate { frame, occurrence: usize::from(frame == "HelloOk"), ..CreationGate::default() });
     let _release = Release(gate.clone());
     let (address, _) = relay_with_creation_gate(fixture.home.clone(), 1, None, Some(gate.clone()));
     let mut owner = fixture.client("connect", Some("ReadyWait"), &address);
@@ -1991,11 +2113,8 @@ fn real_shell_survives_network_loss_detach_and_resume() {
         &fixture.home.join("client").join("sessions").join(target),
         Uuid::parse_str(&id).unwrap()).unwrap();
     let state = store.load(target, Uuid::parse_str(&id).unwrap()).unwrap();
-    for secret in [&state.claim, state.token.as_ref().unwrap()] {
-        let hex: String = secret.iter().map(|byte| format!("{byte:02x}")).collect();
-        assert!(!client.err.contains(&hex));
-        assert!(!client.err.contains(&format!("{secret:?}")));
-    }
+    let saved = serde_json::to_value(&state).unwrap();
+    assert!(saved.get("token").is_none() && saved.get("claim").is_none());
     drop(store);
     let mut resumed = fixture.client("connect", Some("MyWork"), &addr);
     let _attached = connections.recv_timeout(Duration::from_secs(10)).unwrap();
@@ -2026,6 +2145,176 @@ fn real_shell_survives_network_loss_detach_and_resume() {
 
 #[test]
 #[ignore = "explicit functional fixture feature or trusted SIGNED_CLIENT/SIGNED_HOST required"]
+fn discovery_metadata_timeout_retries_fresh_resolution_without_early_state() {
+    use std::sync::atomic::Ordering;
+    let fixture = Fixture::new();
+    let (address, _) = relay(fixture.home.clone(), 1);
+    let mut first = fixture.client("connect", Some("metadata-retry"), &address);
+    first.command("Write-Output ('METADATA_FIRST=' + $PID + ':ready')");
+    first.wait_for(|out, _| pid_marker(out, "METADATA_FIRST=", ":ready").is_some());
+    let pid = pid_marker(&first.out, "METADATA_FIRST=", ":ready").unwrap();
+    let id = first.guid();
+    first.detach();
+    fixture.wait_for_session_state(&id, false, false);
+
+    let vendor = fixture.home.join("vendor.exe");
+    let built = Command::new("rustc").args(["--edition=2021", "tests\\fixtures\\auth_vendor.rs", "-o"])
+        .arg(&vendor).output().unwrap();
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    let root = fixture.home.join("b");
+    arterm::client_config::update(&root, |config| {
+        config.devtunnel_path = Some(vendor.clone());
+        arterm::client_config::add(config, "fixture", "fixture", host_executable())?;
+        Ok(())
+    }).unwrap();
+    fs::write(fixture.home.join("mode"), "discovery_timeout_once").unwrap();
+    fs::write(fixture.home.join("ready"), "ready").unwrap();
+    let gate = Arc::new(CreationGate { frame: "SessionResolved", ..CreationGate::default() });
+    let (address, _) = relay_with_creation_gate(fixture.home.clone(), 1, None, Some(gate.clone()));
+    fs::write(fixture.home.join("address"), address).unwrap();
+    let mut command = Command::new(client_executable());
+    command.env("VSTERM_REMOTE_HOME", &root).env("TEMP", &fixture.home).env("TMP", &fixture.home)
+        .args(["resume", "fixture", "metadata-retry", "--stdio", "--retries", "2", "--timeout", "3s"]);
+    let started = Instant::now();
+    let mut second = RunningClient::spawn(command);
+    second.wait_for(|_, _| gate.observed.load(Ordering::Acquire));
+    let calls = fs::read_to_string(fixture.home.join("calls")).unwrap();
+    let published_early = root.join("client").join("sessions").exists();
+    gate.release.store(true, Ordering::Release);
+    assert_eq!(calls.lines().filter(|line| *line == "list").count(), 2);
+    assert!(!calls.contains("login-hidden") && !calls.contains("login-console"));
+    assert!(!published_early, "metadata retry published unconfirmed local state");
+    assert!(started.elapsed() >= Duration::from_secs(3));
+    second.command("Write-Output ('METADATA_RETRY=' + $PID + ':ready')");
+    second.wait_for(|out, _| pid_marker(out, "METADATA_RETRY=", ":ready").is_some());
+    assert_eq!(second.guid(), id);
+    assert_eq!(pid_marker(&second.out, "METADATA_RETRY=", ":ready").unwrap(), pid);
+    second.detach();
+}
+
+#[test]
+#[ignore = "explicit functional fixture feature or trusted SIGNED_CLIENT/SIGNED_HOST required"]
+fn fresh_lookup_retries_before_publishing_local_state() {
+    use std::sync::atomic::Ordering;
+    let fixture = Fixture::new();
+    let gate = Arc::new(CreationGate { reject_first: 1, frame: "HelloOk", ..CreationGate::default() });
+    let (address, _) = relay_with_creation_gate(fixture.home.clone(), 1, None, Some(gate.clone()));
+    let mut client = fixture.client("connect", Some("lookup-retry"), &address);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !gate.observed.load(Ordering::Acquire) {
+        assert!(Instant::now() < deadline, "lookup was not retried after a transient connection failure");
+        thread::sleep(Duration::from_millis(10));
+    }
+    let published_early = fixture.home.join("client").join("sessions").exists();
+    gate.release.store(true, Ordering::Release);
+    assert!(!published_early, "lookup published local state before a successful response");
+    client.command("Write-Output ('LOOKUP_RETRY=' + $PID + ':ready')");
+    client.wait_for(|out, _| pid_marker(out, "LOOKUP_RETRY=", ":ready").is_some());
+    let inventory = fixture.host_command("sessions").arg("--json").output().unwrap();
+    let sessions: serde_json::Value = serde_json::from_slice(&inventory.stdout).unwrap();
+    assert_eq!(sessions.as_array().unwrap().len(), 1);
+    assert_eq!(sessions[0]["id"], client.guid());
+    client.detach();
+}
+
+#[test]
+#[ignore = "explicit functional fixture feature or trusted SIGNED_CLIENT/SIGNED_HOST required"]
+fn printed_pending_create_retry_preserves_identity_then_switches_to_guid_resume() {
+    let fixture = Fixture::new();
+    let gate = Arc::new(CreationGate { reject_after_first: 3, ..CreationGate::default() });
+    let (address, _) = relay_with_creation_gate(fixture.home.clone(), 1, None, Some(gate));
+    let mut failed = fixture.client("connect", Some("retry-create"), &address);
+    failed.wait_exit(1);
+    let id = failed.guid();
+    let config = arterm::client_config::load(&fixture.home).unwrap();
+    let target = &config.targets["fixture"];
+    let dir = arterm::client_config::state_dir(&fixture.home, target);
+    let read_state = || {
+        let bytes = fs::read(dir.join(format!("{id}.dpapi"))).unwrap();
+        serde_json::from_slice::<serde_json::Value>(&arterm::store::protect(&bytes, false).unwrap()).unwrap()
+    };
+    let before = read_state();
+    assert_eq!(before["mode"], "create_pending");
+    assert!(before["origin"].is_null(), "connection failure must precede CreateSession");
+    let inventory = fixture.host_command("sessions").arg("--json").output().unwrap();
+    assert!(serde_json::from_slice::<serde_json::Value>(&inventory.stdout).unwrap().as_array().unwrap().is_empty());
+    let printed = failed.err.lines().filter_map(|line| line.strip_prefix("[session] Resume command: "))
+        .last().expect("missing retry command").to_owned();
+    assert!(printed.contains("connect 'fixture' retry-create"), "{printed}");
+
+    let mut command = Command::new("powershell.exe");
+    command.env("VSTERM_REMOTE_HOME", &fixture.home).env("TEMP", &fixture.home).env("TMP", &fixture.home)
+        .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", &printed]);
+    let mut retry = RunningClient::spawn(command);
+    let resumed = format!("resume 'fixture' {id}");
+    retry.wait_for(|_, err| err.lines().any(|line|
+        line.starts_with("[session] Resume command: ") && line.contains(&resumed)));
+    let after = read_state();
+    assert_eq!(after["mode"], "attached");
+    for field in ["id", "request_id", "client_id", "shell", "args", "cwd", "create_epoch"] {
+        assert_eq!(after[field], before[field], "retry replaced {field}");
+    }
+    let inventory = fixture.host_command("sessions").arg("--json").output().unwrap();
+    let sessions: serde_json::Value = serde_json::from_slice(&inventory.stdout).unwrap();
+    assert_eq!(sessions.as_array().unwrap().len(), 1);
+    assert_eq!(sessions[0]["id"], id);
+    let detached = Command::new(controller_executable()).env("VSTERM_REMOTE_HOME", &fixture.home)
+        .args(["detach", "fixture", &id, "--json"]).output().unwrap();
+    assert!(detached.status.success(), "{}", String::from_utf8_lossy(&detached.stderr));
+    retry.wait_exit(0);
+    fixture.wait_for_session_state(&id, false, false);
+}
+
+#[test]
+#[ignore = "explicit functional fixture feature or trusted SIGNED_CLIENT/SIGNED_HOST required"]
+fn fresh_client_roots_resume_host_guid_and_alias_without_recovery_files() {
+    let fixture = Fixture::new();
+    let (addr, _) = relay(fixture.home.clone(), 8);
+    let mut first = fixture.client("connect", Some("canonical"), &addr);
+    first.command(&format!("$global:FreshOwnerValue='kept'; Set-Location -LiteralPath '{}'; Write-Output ('OWNER_A=' + $PID + ':kept')",
+        fixture.home.display().to_string().replace('\'', "''")));
+    first.wait_for(|out, _| pid_marker(out, "OWNER_A=", ":kept").is_some());
+    let pid = pid_marker(&first.out, "OWNER_A=", ":kept").unwrap();
+    let id = first.guid();
+    let roots: Vec<_> = ["client-b", "client-c"].iter().map(|name| {
+        let root = fixture.home.join(name);
+        let registered = Command::new(client_executable()).env("VSTERM_REMOTE_HOME", &root)
+            .args(["add", "fixture", "--tunnel", "fixture", "--host-path", host_executable()])
+            .output().unwrap();
+        assert!(registered.status.success(), "{}", String::from_utf8_lossy(&registered.stderr));
+        assert!(!root.join("client").join("sessions").exists());
+        root
+    }).collect();
+    for reference in ["unmapped".to_owned(), Uuid::now_v7().to_string()] {
+        let mut missing = fixture.client_at_root(&roots[1], "resume", Some(&reference), &addr);
+        missing.wait_exit(1);
+        assert!(!roots[1].join("client").join("sessions").exists(),
+            "failed lookup published a phantom local session");
+    }
+    let mut busy = fixture.client_at_root(&roots[0], "resume", Some(&id), &addr);
+    busy.wait_for(|_, err| err.contains("WriterBusy") || err.contains("writer"));
+    busy.wait_exit(1);
+    first.detach();
+    fixture.wait_for_session_state(&id, false, false);
+    for (root, reference, marker) in [(&roots[0], id.as_str(), "OWNER_B="),
+        (&roots[0], "canonical", "OWNER_B_ALIAS="), (&roots[1], "canonical", "OWNER_C=")] {
+        let mut client = fixture.client_at_root(root, "resume", Some(reference), &addr);
+        client.command(&format!("Write-Output ('{marker}' + $PID + ':' + $global:FreshOwnerValue); Write-Output ('OWNER_CWD_OK=' + ((Get-Location).Path -eq '{}'))",
+            fixture.home.display().to_string().replace('\'', "''")));
+        client.wait_for(|out, _| pid_marker(out, marker, ":kept").is_some() && out.contains("OWNER_CWD_OK=True"));
+        assert_eq!(pid_marker(&client.out, marker, ":kept").unwrap(), pid);
+        assert_eq!(client.guid(), id);
+        client.detach();
+        fixture.wait_for_session_state(&id, false, false);
+    }
+    let output = fixture.host_command("sessions").arg("--json").output().unwrap();
+    let sessions: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(sessions.as_array().unwrap().len(), 1);
+    assert_eq!(sessions[0]["alias"], "canonical");
+}
+
+#[test]
+#[ignore = "explicit functional fixture feature or trusted SIGNED_CLIENT/SIGNED_HOST required"]
 fn intentional_remote_exit_ends_the_client_without_recovery_instructions() {
     for code in [0, 7] {
         let fixture = Fixture::new();
@@ -2035,13 +2324,15 @@ fn intentional_remote_exit_ends_the_client_without_recovery_instructions() {
         client.wait_for(|out, _| pid_marker(out, "READY=", ":exit").is_some());
         let _connection = connections.recv_timeout(Duration::from_secs(5)).unwrap();
         let retired_id = client.guid();
+        client.wait_for(|_, err| err.contains(&format!("resume 'fixture' {retired_id}")));
+        let recovery_commands = client.err.matches("Resume command:").count();
         client.command(&format!("exit {code}"));
         client.wait_exit(code);
         assert!(client.err.contains(&format!("Remote exit code: {code}")), "{}", client.err);
         assert!(!client.err.contains("Reconnecting"), "{}", client.err);
         assert!(!client.err.contains("Attachment lost"), "{}", client.err);
-        assert_eq!(client.err.matches("Resume command:").count(), 1,
-            "only initial startup may print the resume command: {}", client.err);
+        assert_eq!(client.err.matches("Resume command:").count(), recovery_commands,
+            "remote exit must not print new recovery guidance: {}", client.err);
         let mut later = fixture.client("connect", Some(&retired_id), &addr);
         later.wait_exit(1);
         assert!(later.err.contains("already retired"), "{}", later.err);
@@ -2379,9 +2670,10 @@ fn retired_name_reuse_is_fresh_and_old_guid_termination_cannot_touch_replacement
     let fresh_id = fresh.guid();
     assert_ne!(fresh_id, old_id);
     let current = read(&fresh_id);
-    for field in ["id", "client_id", "request_id", "claim", "token"] {
+    for field in ["id", "client_id", "request_id"] {
         assert!(current[field] != previous[field], "fresh session reused {field}");
     }
+    assert!(current.get("claim").is_none() && current.get("token").is_none());
     let retired = Command::new(client_executable()).env("VSTERM_REMOTE_HOME", &fixture.home)
         .args(["terminate", "fixture", &old_id, "--address", &addr, "--json"]).output().unwrap();
     assert!(retired.status.success());
@@ -2402,7 +2694,7 @@ fn retired_name_reuse_is_fresh_and_old_guid_termination_cannot_touch_replacement
 
 #[test]
 #[ignore = "explicit functional fixture feature or trusted SIGNED_CLIENT/SIGNED_HOST required"]
-fn authorized_same_broker_inventory_retires_missing_ids_but_not_rejected_live_credentials() {
+fn authorized_same_broker_inventory_retires_missing_ids_and_owner_can_terminate() {
     use arterm::{client_config, store::{self, SessionReference, Store}};
     let fixture = Fixture::new();
     let (addr, _connections) = relay(fixture.home.clone(), 10);
@@ -2425,7 +2717,7 @@ fn authorized_same_broker_inventory_retires_missing_ids_but_not_rejected_live_cr
         let (record, mut state) = Store::resolve(root, &target.target_id,
             &SessionReference::parse(name).unwrap(), true, Some(&test_shell()), None).unwrap();
         state.origin = Some(origin.clone());
-        state.token = Some(vec![42;32]);
+        state.mode = arterm::store::SessionMode::Attached;
         state.command_execution = Some(false);
         state.ended = ended;
         record.save(&state).unwrap();
@@ -2441,7 +2733,7 @@ fn authorized_same_broker_inventory_retires_missing_ids_but_not_rejected_live_cr
     let missing_without_token = make(&dir, "MissingNoToken", true);
     let record = Store::open(&dir, missing_without_token).unwrap();
     let mut state = record.load(&target.target_id, missing_without_token).unwrap();
-    state.token = None;
+    state.mode = arterm::store::SessionMode::CreatePending;
     record.save(&state).unwrap();
     drop(record);
     let no_token = invoke(&fixture.home, &["terminate", "fixture", "missingnotoken", "--address", &addr, "--json"]);
@@ -2461,20 +2753,15 @@ fn authorized_same_broker_inventory_retires_missing_ids_but_not_rejected_live_cr
     let old = invoke(&fixture.home, &["terminate", "fixture", &missing.to_string(), "--address", &addr, "--json"]);
     assert!(old.status.success());
     assert_eq!(serde_json::from_slice::<serde_json::Value>(&old.stdout).unwrap()["status"], "already_retired");
-    let unowned = fixture.home.join("rejected-controller");
+    let unowned = fixture.home.join("b");
     fs::create_dir_all(unowned.join("client")).unwrap();
     fs::copy(fixture.home.join("client").join("config.json"), unowned.join("client").join("config.json")).unwrap();
     let unowned_dir = client_config::state_dir(&unowned, target);
     let probe = make(&unowned_dir, &keeper_id, false);
     assert_eq!(probe.to_string(), keeper_id);
-    let before = fs::read(unowned_dir.join(format!("{probe}.dpapi"))).unwrap();
-    let rejected = invoke(&unowned, &["terminate", "fixture", &keeper_id, "--address", &addr, "--json"]);
-    assert!(!rejected.status.success());
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("reference was retained"));
-    assert_eq!(fs::read(unowned_dir.join(format!("{probe}.dpapi"))).unwrap(), before);
-    keeper.command("Write-Output ('AFTER='+$PID+':live'); Write-Output $global:Keep");
-    keeper.wait_for(|out, _| pid_marker(out, "AFTER=", ":live").is_some() && out.contains("neighbor"));
-    assert_eq!(pid_marker(&keeper.out, "AFTER=", ":live"), pid_marker(&keeper.out, "KEEPER=", ":live"));
+    let terminated = invoke(&unowned, &["terminate", "fixture", &keeper_id, "--address", &addr, "--json"]);
+    assert!(terminated.status.success(), "{}", String::from_utf8_lossy(&terminated.stderr));
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&terminated.stdout).unwrap()["status"], "terminated");
+    fixture.wait_for_session_state(&keeper_id, true, false);
     fresh.detach();
-    keeper.detach();
 }
