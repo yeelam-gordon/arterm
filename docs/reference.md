@@ -297,6 +297,9 @@ creation. Exclusive
 locks prevent concurrent local use from creating duplicate sessions. Missing,
 corrupt, incomplete, expired, or unauthorized recovery records fail closed.
 Do not delete them to troubleshoot a connection.
+For a host-confirmed existing session, the GUID record is saved before claiming a
+local alias. An alias conflict can leave that usable GUID unnamed, but cannot
+replace another alias binding or strand the GUID without recovery state.
 
 Read-only host resolution honors `--retries` with the same bounded backoff as
 attachment reconnects. Transient connection/timeout failures can retry;

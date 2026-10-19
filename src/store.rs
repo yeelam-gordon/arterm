@@ -504,24 +504,32 @@ impl Store {
             ensure!(saved.origin == state.origin && saved.reference.is_none()
                 && saved.mode != SessionMode::CreatePending, "known session binding cannot be replaced");
             let (lock, known) = lock_record(&dir.join(format!("ref-{}.lock", reference.as_str())))?;
-            ensure!(!known, "local alias changed during lookup; retry");
+            ensure!(!known && !dir.join(format!("ref-{}.json", reference.as_str())).try_exists()?,
+                "local alias changed during lookup; retry");
             store._reference_lock = Some(lock);
             saved.reference = state.reference;
             store.save(&saved)?;
             atomic_write(&dir.join(format!("ref-{}.json", reference.as_str())), &serde_json::to_vec(&saved.id)?)?;
             return Ok((store, saved));
         }
+        #[cfg(test)]
+        tests::before_resolved_reservation();
         fs::create_dir_all(dir)?;
-        let reference_lock = if guid.is_none() {
-            let (lock, known) = lock_record(&dir.join(format!("ref-{}.lock", reference.as_str())))?;
-            ensure!(!known, "local alias changed during lookup; retry");
-            Some(lock)
-        } else { None };
         let mut store = Self::open(dir, state.id)?;
         ensure!(!store.known && !store.path.try_exists()?, "session already known locally; use its saved identity");
-        store._reference_lock = reference_lock;
+        // A failed alias claim must leave either no GUID claim or a usable, bound GUID.
+        let name = state.reference.take();
         store.save(&state)?;
+        let reference_lock = if guid.is_none() {
+            let (lock, known) = lock_record(&dir.join(format!("ref-{}.lock", reference.as_str())))?;
+            ensure!(!known && !dir.join(format!("ref-{}.json", reference.as_str())).try_exists()?,
+                "local alias changed during lookup; retry");
+            Some(lock)
+        } else { None };
+        store._reference_lock = reference_lock;
         if guid.is_none() {
+            state.reference = name;
+            store.save(&state)?;
             atomic_write(&dir.join(format!("ref-{}.json", reference.as_str())), &serde_json::to_vec(&state.id)?)?;
         }
         Ok((store, state))
@@ -801,6 +809,123 @@ pub fn random_claim() -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    thread_local! {
+        static BEFORE_RESOLVED_RESERVATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            std::cell::RefCell::new(None);
+    }
+    pub(super) fn before_resolved_reservation() {
+        let callback = BEFORE_RESOLVED_RESERVATION.with(|slot| slot.borrow_mut().take());
+        if let Some(callback) = callback { callback(); }
+    }
+
+    #[test]
+    fn concurrent_guid_reservation_cannot_strand_a_fresh_alias() {
+        use super::*;
+        use std::{cell::RefCell, rc::Rc};
+        for keep_open in [true, false] {
+            let dir = std::env::temp_dir().join(format!("alias-guid-race-{}", Uuid::now_v7()));
+            let mut remote = State::new("box".into(), "powershell.exe".into(), vec![], None);
+            remote.mode = SessionMode::AttachOnly;
+            remote.origin = Some(vec![7;16]);
+            let id = remote.id;
+            let original_client = remote.client_id;
+            let held = Rc::new(RefCell::new(None));
+            let held_by_winner = held.clone();
+            let winner_dir = dir.clone();
+            let winner_state = remote.clone();
+            BEFORE_RESOLVED_RESERVATION.with(|slot| *slot.borrow_mut() = Some(Box::new(move || {
+                let (store, mut state) = Store::resolve_with_host(&winner_dir, "box",
+                    &SessionReference::parse(&id.to_string()).unwrap(), false, None, None,
+                    &mut |_| Ok(Some(winner_state.clone()))).unwrap();
+                state.mode = SessionMode::Attached;
+                state.epoch = 2;
+                state.input_ack = 1;
+                state.pending = Some(PendingInput { seq: 2, bytes: b"pending".to_vec() });
+                store.save(&state).unwrap();
+                if keep_open { *held_by_winner.borrow_mut() = Some(store); }
+            })));
+            remote.client_id = Uuid::now_v7();
+            let alias = SessionReference::parse("shared").unwrap();
+            assert!(Store::resolve_with_host(&dir, "box", &alias, false, None, None,
+                &mut |_| Ok(Some(remote.clone()))).is_err());
+            assert!(!dir.join("ref-shared.lock").exists(), "losing GUID race stranded the alias");
+            assert!(!dir.join("ref-shared.json").exists());
+            drop(held.borrow_mut().take());
+            let (store, saved) = Store::resolve_with_host(&dir, "box", &alias, false, None, None,
+                &mut |_| Ok(Some(remote.clone()))).unwrap();
+            assert_eq!((saved.id, saved.client_id, saved.epoch, saved.input_ack), (id, original_client, 2, 1));
+            assert_eq!(saved.pending.as_ref().unwrap().bytes, b"pending");
+            assert_eq!(saved.reference.as_deref(), Some("shared"));
+            drop(store);
+            fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn competing_alias_claim_never_leaves_an_unusable_guid_reservation() {
+        use super::*;
+        use std::{cell::RefCell, rc::Rc};
+        let dir = std::env::temp_dir().join(format!("alias-claim-race-{}", Uuid::now_v7()));
+        let alias = SessionReference::parse("shared").unwrap();
+        let mut remote = State::new("box".into(), "powershell.exe".into(), vec![], None);
+        remote.mode = SessionMode::AttachOnly;
+        remote.origin = Some(vec![7;16]);
+        let held = Rc::new(RefCell::new(None));
+        let held_by_winner = held.clone();
+        let winner_dir = dir.clone();
+        let winner_alias = alias.clone();
+        BEFORE_RESOLVED_RESERVATION.with(|slot| *slot.borrow_mut() = Some(Box::new(move || {
+            *held_by_winner.borrow_mut() = Some(Store::resolve(&winner_dir, "box", &winner_alias,
+                true, None, None).unwrap());
+        })));
+        assert!(Store::resolve_with_host(&dir, "box", &alias, false, None, None,
+            &mut |_| Ok(Some(remote.clone()))).is_err());
+        let original_id = held.borrow().as_ref().unwrap().1.id;
+        let mapping: Uuid = serde_json::from_slice(&fs::read(dir.join("ref-shared.json")).unwrap()).unwrap();
+        assert_eq!(mapping, original_id);
+        if dir.join(format!("{}.lock", remote.id)).exists() {
+            let store = Store::open(&dir, remote.id).unwrap();
+            let saved = store.load("box", remote.id).expect("alias collision stranded a new GUID");
+            assert!(saved.reference.is_none());
+            assert_eq!((saved.id, saved.origin), (remote.id, remote.origin));
+        }
+        drop(held.borrow_mut().take());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn late_mapping_and_existing_interrupted_alias_guards_are_not_replaced() {
+        use super::*;
+        let dir = std::env::temp_dir().join(format!("alias-guard-race-{}", Uuid::now_v7()));
+        let alias = SessionReference::parse("shared").unwrap();
+        let mut remote = State::new("box".into(), "powershell.exe".into(), vec![], None);
+        remote.mode = SessionMode::AttachOnly;
+        remote.origin = Some(vec![7;16]);
+        let old_id = Uuid::now_v7();
+        let competitor_dir = dir.clone();
+        BEFORE_RESOLVED_RESERVATION.with(|slot| *slot.borrow_mut() = Some(Box::new(move || {
+            fs::create_dir_all(&competitor_dir).unwrap();
+            atomic_write(&competitor_dir.join("ref-shared.json"), &serde_json::to_vec(&old_id).unwrap()).unwrap();
+        })));
+        assert!(Store::resolve_with_host(&dir, "box", &alias, false, None, None,
+            &mut |_| Ok(Some(remote.clone()))).is_err());
+        let mapping: Uuid = serde_json::from_slice(&fs::read(dir.join("ref-shared.json")).unwrap()).unwrap();
+        assert_eq!(mapping, old_id);
+        let store = Store::open(&dir, remote.id).unwrap();
+        assert!(store.load("box", remote.id).unwrap().reference.is_none());
+        drop(store);
+        fs::remove_dir_all(&dir).unwrap();
+
+        fs::create_dir_all(&dir).unwrap();
+        drop(lock_record(&dir.join("ref-shared.lock")).unwrap());
+        assert!(Store::resolve_with_host(&dir, "box", &alias, false, None, None,
+            &mut |_| panic!("interrupted guard must fail before lookup")).is_err());
+        assert!(dir.join("ref-shared.lock").exists());
+        assert!(!dir.join("ref-shared.json").exists());
+        assert!(!dir.join(format!("{}.lock", remote.id)).exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn legacy_migration_drops_secrets_but_preserves_replay_identity_and_rejects_unbound_state() {
         use super::*;
