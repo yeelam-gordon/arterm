@@ -367,7 +367,8 @@ fn relay_with_creation_gate(home: PathBuf, attachments: usize, trace: Option<Arc
                     ),
                 ]),
             );
-            let spawn = rmpv::decode::read_value(&mut incoming).unwrap();
+            // Forward discovery probes only the VS version, then closes.
+            let Ok(spawn) = rmpv::decode::read_value(&mut incoming) else { return; };
             assert_eq!(get(&spawn, "method").as_str(), Some("spawn"));
             let params = get(&spawn, "params");
             assert_eq!(
@@ -2043,6 +2044,55 @@ fn real_shell_survives_network_loss_detach_and_resume() {
     assert_ne!(pid_marker(&fresh.out, "NEW=", ":new").unwrap(), pid);
     fresh.detach();
     assert!(!history_path.exists());
+}
+
+#[test]
+#[ignore = "explicit functional fixture feature or trusted SIGNED_CLIENT/SIGNED_HOST required"]
+fn discovery_metadata_timeout_retries_fresh_resolution_without_early_state() {
+    use std::sync::atomic::Ordering;
+    let fixture = Fixture::new();
+    let (address, _) = relay(fixture.home.clone(), 1);
+    let mut first = fixture.client("connect", Some("metadata-retry"), &address);
+    first.command("Write-Output ('METADATA_FIRST=' + $PID + ':ready')");
+    first.wait_for(|out, _| pid_marker(out, "METADATA_FIRST=", ":ready").is_some());
+    let pid = pid_marker(&first.out, "METADATA_FIRST=", ":ready").unwrap();
+    let id = first.guid();
+    first.detach();
+    fixture.wait_for_session_state(&id, false, false);
+
+    let vendor = fixture.home.join("vendor.exe");
+    let built = Command::new("rustc").args(["--edition=2021", "tests\\fixtures\\auth_vendor.rs", "-o"])
+        .arg(&vendor).output().unwrap();
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    let root = fixture.home.join("b");
+    arterm::client_config::update(&root, |config| {
+        config.devtunnel_path = Some(vendor.clone());
+        arterm::client_config::add(config, "fixture", "fixture", host_executable())?;
+        Ok(())
+    }).unwrap();
+    fs::write(fixture.home.join("mode"), "discovery_timeout_once").unwrap();
+    fs::write(fixture.home.join("ready"), "ready").unwrap();
+    let gate = Arc::new(CreationGate { frame: "SessionResolved", ..CreationGate::default() });
+    let (address, _) = relay_with_creation_gate(fixture.home.clone(), 1, None, Some(gate.clone()));
+    fs::write(fixture.home.join("address"), address).unwrap();
+    let mut command = Command::new(client_executable());
+    command.env("VSTERM_REMOTE_HOME", &root).env("TEMP", &fixture.home).env("TMP", &fixture.home)
+        .args(["resume", "fixture", "metadata-retry", "--stdio", "--retries", "2", "--timeout", "3s"]);
+    let started = Instant::now();
+    let mut second = RunningClient::spawn(command);
+    second.wait_for(|_, _| gate.observed.load(Ordering::Acquire));
+    let calls = fs::read_to_string(fixture.home.join("calls")).unwrap();
+    let published_early = root.join("client").join("sessions").exists();
+    gate.release.store(true, Ordering::Release);
+    assert_eq!(calls.lines().filter(|line| *line == "list").count(), 2);
+    assert!(!calls.contains("login-hidden") && !calls.contains("login-console"));
+    assert!(!published_early, "metadata retry published unconfirmed local state");
+    assert!(started.elapsed() >= Duration::from_secs(3));
+    second.command("Write-Output ('METADATA_RETRY=' + $PID + ':ready')");
+    second.wait_for(|out, _| pid_marker(out, "METADATA_RETRY=", ":ready").is_some());
+    assert_eq!(second.guid(), id);
+    assert_eq!(pid_marker(&second.out, "METADATA_RETRY=", ":ready").unwrap(), pid);
+    second.detach();
 }
 
 #[test]

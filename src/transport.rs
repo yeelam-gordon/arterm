@@ -355,7 +355,9 @@ struct Captured {
 fn remaining(deadline: Instant) -> Result<Duration> {
     deadline
         .checked_duration_since(Instant::now())
-        .context("devtunnel metadata/startup timed out")
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::TimedOut,
+            "devtunnel metadata/startup timed out").into())
 }
 
 fn read_bounded(mut reader: impl Read, limit: usize) -> std::io::Result<(Vec<u8>, bool)> {
@@ -415,10 +417,9 @@ fn capture_bounded(mut command: Command, timeout: Duration, limit: usize) -> Res
 
         if Instant::now() >= deadline {
             kill_owned_process_tree(&mut child);
-            bail!(
-                "devtunnel metadata command timed out after {} seconds",
-                timeout.as_secs_f32()
-            );
+            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut,
+                format!("devtunnel metadata command timed out after {} seconds",
+                    timeout.as_secs_f32())).into());
         }
         thread::sleep(Duration::from_millis(25));
     };
@@ -1356,7 +1357,14 @@ mod tests {
         sleeper.args(["--exact", "transport::tests::metadata_child", "--nocapture"]);
         sleeper.env("VSTERM_METADATA_CHILD", "sleep");
         let started = Instant::now();
-        assert!(capture_bounded(sleeper, Duration::from_millis(150), 1024).is_err());
+        let error = capture_bounded(sleeper, Duration::from_millis(150), 1024).err().expect("metadata command must time out");
+        assert_eq!(error.downcast_ref::<std::io::Error>().map(std::io::Error::kind),
+            Some(std::io::ErrorKind::TimedOut));
+        assert!(retryable_connection_error(&error));
+        let expired = remaining(Instant::now() - Duration::from_millis(1)).unwrap_err();
+        assert_eq!(expired.downcast_ref::<std::io::Error>().map(std::io::Error::kind),
+            Some(std::io::ErrorKind::TimedOut));
+        assert!(retryable_connection_error(&expired));
         assert!(started.elapsed() < Duration::from_secs(5));
     }
 
