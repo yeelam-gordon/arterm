@@ -14,6 +14,10 @@ fn main() {
     let root = env::current_exe().unwrap().parent().unwrap().to_owned();
     let mode = fs::read_to_string(root.join("mode")).unwrap();
     let args: Vec<String> = env::args().skip(1).collect();
+    if mode == "arguments" {
+        println!("{args:?}");
+        return;
+    }
     let ready = root.join("ready");
     let log = |message: &str| {
         let mut file = fs::OpenOptions::new()
@@ -56,6 +60,8 @@ fn main() {
         } else {
             "login-console"
         });
+        fs::write(root.join("login-pid.pending"), process::id().to_string()).unwrap();
+        fs::rename(root.join("login-pid.pending"), root.join("login-pid")).unwrap();
         println!("SECRET_OAUTH_URL=https://fixture.invalid/TOKEN");
         eprintln!("SECRET_OAUTH_TOKEN");
         match mode.as_str() {

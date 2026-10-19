@@ -1794,6 +1794,21 @@ fn interactive_win32_keyup_preserves_command_readiness() {
 fn fresh_lookup_remains_interruptible_before_console_capture() {
     use portable_pty::{native_pty_system, CommandBuilder, PtySize};
     use std::sync::atomic::Ordering;
+    use windows_sys::Win32::{Foundation::{CloseHandle, HANDLE}, System::Threading::{
+        OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_TERMINATE,
+    }};
+    struct LoginHelper(HANDLE, u32);
+    impl Drop for LoginHelper {
+        fn drop(&mut self) {
+            unsafe {
+                if WaitForSingleObject(self.0, 0) != 0 {
+                    TerminateProcess(self.0, 1);
+                    WaitForSingleObject(self.0, 5000);
+                }
+                CloseHandle(self.0);
+            }
+        }
+    }
     struct OwnedChild(Box<dyn portable_pty::Child + Send + Sync>);
     impl Drop for OwnedChild {
         fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
@@ -1802,14 +1817,27 @@ fn fresh_lookup_remains_interruptible_before_console_capture() {
     impl Drop for Release {
         fn drop(&mut self) { self.0.release.store(true, Ordering::Release); }
     }
+    for hidden_login in [false, true] {
     let fixture = Fixture::new();
+    if hidden_login {
+        let vendor = fixture.home.join("vendor.exe");
+        let built = Command::new("rustc").args(["--edition=2021", "tests\\fixtures\\auth_vendor.rs", "-o"])
+            .arg(&vendor).output().unwrap();
+        assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+        arterm::client_config::update(&fixture.home, |config| {
+            config.devtunnel_path = Some(vendor);
+            Ok(())
+        }).unwrap();
+        fs::write(fixture.home.join("mode"), "login_hang").unwrap();
+    }
     let gate = Arc::new(CreationGate { frame: "HelloOk", ..CreationGate::default() });
     let _release = Release(gate.clone());
     let (address, _) = relay_with_creation_gate(fixture.home.clone(), 1, None, Some(gate.clone()));
     let pair = native_pty_system().openpty(PtySize { rows: 30, cols: 100, pixel_width: 0, pixel_height: 0 }).unwrap();
     let mut command = CommandBuilder::new(client_executable());
     command.env("VSTERM_REMOTE_HOME", &fixture.home);
-    command.args(["resume", "fixture", "cancel-lookup", "--address", &address, "--retries", "20"]);
+    command.args(["resume", "fixture", "cancel-lookup", "--retries", "20"]);
+    if !hidden_login { command.args(["--address", &address]); }
     let mut client = OwnedChild(pair.slave.spawn_command(command).unwrap());
     drop(pair.slave);
     let mut writer = pair.master.take_writer().unwrap();
@@ -1823,10 +1851,17 @@ fn fresh_lookup_remains_interruptible_before_console_capture() {
     });
     let mut received = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(15);
-    while !gate.observed.load(Ordering::Acquire) {
+    while if hidden_login { !fixture.home.join("login-pid").exists() } else { !gate.observed.load(Ordering::Acquire) } {
         assert!(Instant::now() < deadline, "lookup not observed: {}", String::from_utf8_lossy(&received));
         if let Ok(bytes) = rx.recv_timeout(Duration::from_millis(25)) { received.extend(bytes); }
     }
+    let helper = hidden_login.then(|| {
+        let pid = fs::read_to_string(fixture.home.join("login-pid")).unwrap().parse().unwrap();
+        let handle = unsafe { OpenProcess(0x00100000 | PROCESS_TERMINATE, 0, pid) };
+        assert!(!handle.is_null(), "cannot pin test-owned login helper");
+        assert!(fs::read_to_string(fixture.home.join("calls")).unwrap().contains("login-hidden"));
+        LoginHelper(handle, pid)
+    });
     writer.write_all(&[3]).unwrap();
     writer.flush().unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -1844,6 +1879,11 @@ fn fresh_lookup_remains_interruptible_before_console_capture() {
     drop(writer);
     drop(pair.master);
     output.join().unwrap();
+    if let Some(helper) = helper {
+        assert_eq!(unsafe { WaitForSingleObject(helper.0, 5000) }, 0,
+            "hidden login helper {} survived client Ctrl+C", helper.1);
+    }
+    }
 }
 
 #[test]

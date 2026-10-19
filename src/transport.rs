@@ -1,4 +1,6 @@
 use crate::wire::{self, binary, get, map, num, s, text, Frames};
+#[path = "vendor_process.rs"]
+mod vendor_process;
 use crate::statusln as eprintln;
 use anyhow::{bail, ensure, Context, Result};
 use rmpv::Value;
@@ -437,6 +439,30 @@ fn capture_bounded(mut command: Command, timeout: Duration, limit: usize) -> Res
     })
 }
 
+fn capture_vendor(program: &Path, args: &[&str], timeout: Duration, limit: usize, hidden: bool) -> Result<Captured> {
+    let mut child = vendor_process::VendorProcess::spawn(program, args, hidden)?;
+    let stdout = child.stdout.take().context("vendor stdout")?;
+    let stderr = child.stderr.take().context("vendor stderr")?;
+    let (out_tx, out_rx) = mpsc::sync_channel(1);
+    let (err_tx, err_rx) = mpsc::sync_channel(1);
+    thread::spawn(move || { let _ = out_tx.send(read_bounded(stdout, limit)); });
+    thread::spawn(move || { let _ = err_tx.send(read_bounded(stderr, limit)); });
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child.try_wait()? { break status; }
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut,
+                format!("devtunnel metadata command timed out after {} seconds", timeout.as_secs_f32())).into());
+        }
+        thread::sleep(Duration::from_millis(25));
+    };
+    let stdout = out_rx.recv_timeout(remaining(deadline)?)
+        .context("devtunnel metadata stdout did not close before timeout")??;
+    let stderr = err_rx.recv_timeout(remaining(deadline)?)
+        .context("devtunnel metadata stderr did not close before timeout")??;
+    Ok(Captured { status, stdout: stdout.0, stderr: stderr.0, truncated: stdout.1 || stderr.1 })
+}
+
 pub fn output_bounded(command: Command, timeout: Duration) -> Result<std::process::Output> {
     let output = capture_bounded(command, timeout, 4 * 1024 * 1024)?;
     ensure!(
@@ -554,9 +580,7 @@ mod discovery_tests {
 }
 
 fn metadata(devtunnel: &Path, args: &[&str], deadline: Instant) -> Result<Captured> {
-    let mut command = Command::new(devtunnel);
-    command.args(args);
-    capture_bounded(command, remaining(deadline)?, 4 * 1024 * 1024)
+    capture_vendor(devtunnel, args, remaining(deadline)?, 4 * 1024 * 1024, false)
 }
 
 fn authentication_failure_text(text: &str) -> bool {
@@ -834,11 +858,8 @@ impl Authentication {
                 "automatic devtunnel sign-in already attempted"
             );
             let attempt = (|| -> Result<()> {
-                let mut login = Command::new(devtunnel);
-                login
-                    .creation_flags(CREATE_NO_WINDOW)
-                    .args(["user", "login", "--github"]);
-                let output = capture_bounded(login, remaining(deadline)?, 64 * 1024)?;
+                let output = capture_vendor(devtunnel, &["user", "login", "--github"],
+                    remaining(deadline)?, 64 * 1024, true)?;
                 ensure!(
                     output.status.success(),
                     "automatic devtunnel sign-in exited unsuccessfully"
@@ -1366,6 +1387,22 @@ mod tests {
             Some(std::io::ErrorKind::TimedOut));
         assert!(retryable_connection_error(&expired));
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn owned_vendor_preserves_native_arguments_and_spaced_executable_paths() {
+        let root = std::env::temp_dir().join(format!("vendor args {}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&root).unwrap();
+        let program = root.join("vendor with spaces.exe");
+        let built = Command::new("rustc").args(["--edition=2021", "tests\\fixtures\\auth_vendor.rs", "-o"])
+            .arg(&program).output().unwrap();
+        assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+        fs::write(root.join("mode"), "arguments").unwrap();
+        let args = ["", "with spaces", "embedded\"quote", r"trailing\", r#"slash\"quote"#, "日本語"];
+        let output = capture_vendor(&program, &args, Duration::from_secs(5), 4096, true).unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), format!("{args:?}"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
