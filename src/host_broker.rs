@@ -864,19 +864,6 @@ impl Broker {
         save_reservation(&self.root, &reservation)?;
         let session = Session::spawn(session_id, &fp,
             self.diagnostic_log.as_ref().map(Arc::downgrade).unwrap_or_default())?;
-        reservation.active = true;
-        save_reservation(&self.root, &reservation)?;
-        self.reservations
-            .lock()
-            .unwrap()
-            .insert(request_id, reservation);
-        self.sessions
-            .lock()
-            .unwrap()
-            .insert(session_id, session.clone());
-        if let Some(name) = &fp.session_alias {
-            self.aliases.lock().unwrap().insert(name.clone(), session_id);
-        }
         let attachment = Attachment {
             id: random16()?,
             lease: random16()?,
@@ -885,10 +872,30 @@ impl Broker {
         };
         {
             let mut state = session.state.lock().unwrap();
-            state
-                .highest_epochs
-                .insert(client.to_vec(), attachment.epoch);
+            state.highest_epochs.insert(client.to_vec(), attachment.epoch);
             state.attachment = Some(attachment.clone());
+        }
+        reservation.active = true;
+        save_reservation(&self.root, &reservation)?;
+        self.reservations
+            .lock()
+            .unwrap()
+            .insert(request_id, reservation);
+        // Resolve/attach do not take create_lock. Install the writer before publication.
+        #[cfg(test)]
+        {
+            let state = session.state.lock().unwrap();
+            let writer = state.attachment.as_ref().expect("publication requires an initial writer");
+            assert_eq!((&writer.id, &writer.lease, &writer.client, writer.epoch),
+                (&attachment.id, &attachment.lease, &attachment.client, attachment.epoch));
+            assert_eq!(state.highest_epochs.get(client), Some(&attachment.epoch));
+        }
+        self.sessions
+            .lock()
+            .unwrap()
+            .insert(session_id, session.clone());
+        if let Some(name) = &fp.session_alias {
+            self.aliases.lock().unwrap().insert(name.clone(), session_id);
         }
         Ok((session, false, attachment))
     }
@@ -1167,7 +1174,12 @@ impl Broker {
                                         ),
                                     )?;
                                 } else {
-                                    session.state.lock().unwrap().attachment_connection = Some(connected.clone());
+                                    {
+                                        let mut state = session.state.lock().unwrap();
+                                        if state.attachment.as_ref().is_some_and(|current| current.id == attachment.id) {
+                                            state.attachment_connection = Some(connected.clone());
+                                        }
+                                    }
                                     attached = Some((session.clone(), attachment.id.clone(), attachment.epoch));
                                     let committed = 0u64;
                                     cursor = num(body, "after_output_seq")?;

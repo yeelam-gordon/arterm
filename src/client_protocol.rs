@@ -36,16 +36,29 @@ fn hello(client_id: Uuid, correlation_id: Uuid) -> Value {
 
 fn wait_message(link: &mut impl Link, deadline: Instant) -> Result<Value> {
     loop {
-        ensure!(
-            Instant::now() < deadline,
-            "host protocol handshake timed out"
-        );
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "host protocol handshake timed out").into());
+        }
         match link.poll(Duration::from_millis(100))? {
             Poll::Message(value) => return Ok(value),
             Poll::Idle => {}
-            Poll::Closed => bail!("host bridge closed during protocol handshake"),
+            Poll::Closed => return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof,
+                "host bridge closed during protocol handshake").into()),
         }
     }
+}
+
+pub fn retry_lookup<T>(
+    retries: u32, mut lookup: impl FnMut() -> Result<T>, mut wait: impl FnMut(u32) -> Result<()>,
+) -> Result<T> {
+    for attempt in 0..=retries {
+        if attempt > 0 { wait(attempt)?; }
+        match lookup() {
+            Err(error) if attempt < retries && arterm::transport::retryable_connection_error(&error) => {}
+            result => return result,
+        }
+    }
+    unreachable!("bounded lookup always returns its last result")
 }
 
 pub fn doctor(link: &mut impl Link) -> Result<()> {
@@ -277,9 +290,40 @@ mod tests {
                 ("capabilities", Value::Array(vec![]))])),
         ]) };
         let reference = arterm::store::SessionReference::parse("work").unwrap();
-        assert!(resolve_session(&mut link, "box", &reference).is_err());
+        assert!(retry_lookup(20, || resolve_session(&mut link, "box", &reference),
+            |_| panic!("protocol rejection must not retry")).is_err());
         assert_eq!(link.sent.len(), 1);
         assert_eq!(text(&link.sent[0], "type").unwrap(), "Hello");
+    }
+
+    #[test]
+    fn lookup_retries_are_bounded_and_authentication_errors_remain_terminal() {
+        let mut attempts = 0;
+        let mut waits = Vec::new();
+        let missing = retry_lookup(2, || {
+            attempts += 1;
+            if attempts < 3 {
+                return Err(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "lost lookup").into());
+            }
+            Ok(None::<State>)
+        }, |attempt| { waits.push(attempt); Ok(()) }).unwrap();
+        assert!(missing.is_none());
+        assert_eq!(attempts, 3);
+        assert_eq!(waits, [1, 2]);
+
+        let mut attempts = 0;
+        assert!(retry_lookup(2, || -> Result<()> {
+            attempts += 1;
+            Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "startup timeout").into())
+        }, |_| Ok(())).is_err());
+        assert_eq!(attempts, 3);
+        let mut attempts = 0;
+        assert!(retry_lookup(20, || -> Result<()> {
+            attempts += 1;
+            Err(anyhow::Error::new(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "login transport"))
+                .context(arterm::transport::LoginRequired))
+        }, |_| panic!("authentication must not retry")).is_err());
+        assert_eq!(attempts, 1);
     }
 
     #[test]

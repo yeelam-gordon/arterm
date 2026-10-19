@@ -301,6 +301,10 @@ fn identical_unsigned_production_clients_cannot_start_ipc() {
     let home = std::env::temp_dir().join(format!("arterm-strict-unsigned-{}", Uuid::now_v7()));
     fs::create_dir_all(&home).unwrap();
     assert!(run(&home, &["add","work","--tunnel","fixture","--host-path",r"C:\host.exe"]).status.success());
+    let config = arterm::client_config::load(&home).unwrap();
+    let target = &config.targets["work"];
+    drop(arterm::store::Store::resolve(&arterm::client_config::state_dir(&home, target),
+        &target.target_id, &arterm::store::SessionReference::parse("probe").unwrap(), true, None, None).unwrap());
     let first = home.join("owner.exe");
     let second = home.join("controller.exe");
     fs::copy(env!("CARGO_BIN_EXE_arterm"), &first).unwrap();

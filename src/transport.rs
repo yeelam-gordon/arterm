@@ -154,6 +154,19 @@ impl std::fmt::Display for LoginRequired {
 }
 impl std::error::Error for LoginRequired {}
 
+pub fn retryable_connection_error(error: &anyhow::Error) -> bool {
+    if error.is::<LoginRequired>() || error.is::<AuthenticationRejected>() { return false; }
+    error.chain().any(|cause| {
+        cause.downcast_ref::<std::io::Error>().is_some_and(|error| matches!(error.kind(),
+            std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::NotConnected
+            | std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::Interrupted
+            | std::io::ErrorKind::WouldBlock))
+            || cause.is::<RecvTimeoutError>()
+    })
+}
+
 #[derive(Debug)]
 struct AuthenticationRejected;
 impl std::fmt::Display for AuthenticationRejected {
@@ -232,6 +245,7 @@ impl Forward {
         let mut forward = Self { child, _lock: lock };
         let mut candidates = BTreeMap::new();
         let mut probe_errors = BTreeMap::new();
+        let mut terminal_probe_error = None;
         while Instant::now() < deadline {
             let mut lines = Vec::new();
             match rx.recv_timeout(Duration::from_millis(100)) {
@@ -287,13 +301,16 @@ impl Forward {
                             eprintln!("[client] Control probe {addr}: {diagnostic}");
                             probe_errors.insert(port, diagnostic);
                         }
+                        if !retryable_connection_error(&error) { terminal_probe_error = Some(error); }
                         candidates.insert(port, Instant::now() + Duration::from_secs(5));
                     }
                 }
             }
         }
-        bail!("devtunnel did not expose a compatible control port within {} seconds; {} candidate(s) examined",
-            timeout.as_secs_f64(), probe_errors.len())
+        let detail = format!("devtunnel did not expose a compatible control port within {} seconds; {} candidate(s) examined",
+            timeout.as_secs_f64(), probe_errors.len());
+        if let Some(error) = terminal_probe_error { return Err(error).context(detail); }
+        Err(std::io::Error::new(std::io::ErrorKind::TimedOut, detail).into())
     }
 }
 impl Drop for Forward {

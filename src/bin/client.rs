@@ -384,6 +384,29 @@ fn print_recovery(id: Uuid, command: &str) {
     eprintln!("[session] Resume command: {command}");
 }
 
+fn print_session_recovery(alias: &str, state: &store::State, retries: u32, flags: &ConnectionFlags) -> Result<()> {
+    let pending_name = (state.mode == store::SessionMode::CreatePending)
+        .then_some(state.reference.as_deref()).flatten();
+    let reference = SessionReference::parse(pending_name.unwrap_or(&state.id.to_string()))?;
+    let command = session_command(alias, &reference, retries, flags, pending_name.is_some())?;
+    print_recovery(state.id, &command);
+    if state.mode == store::SessionMode::CreatePending && pending_name.is_none() {
+        eprintln!("[session] Pending creation has no saved name; GUID recovery can only attach an existing host session.");
+    }
+    Ok(())
+}
+
+fn pause_before_retry(attempt: u32, message: &str, cancelled: impl Fn() -> bool) -> Result<bool> {
+    let jitter = u16::from_le_bytes(store::random_claim()?[..2].try_into().unwrap()) as u64 % 251;
+    let delay = (500u64 * (1u64 << (attempt - 1).min(6))).min(15_000) + jitter;
+    eprintln!("[session] {message} in {delay}ms");
+    for _ in 0..(delay / 25 + 1) {
+        if cancelled() { return Ok(false); }
+        thread::sleep(Duration::from_millis(25));
+    }
+    Ok(true)
+}
+
 const ATTACHMENT_LOST_MESSAGE: &str =
     "[session] Attachment lost; this client did not request termination. Remote session state is unknown.";
 
@@ -412,8 +435,13 @@ fn run_session(
     let state_dir = client_config::state_dir(root, &target);
     let (store, state) = match Store::resolve_with_host(&state_dir, &target.target_id, reference, create,
         flags.shell.as_deref(), flags.cwd.as_deref(), &mut |reference| {
-            let mut link = connect_link(&config, &target, flags.address.as_deref(), timeout)?;
-            client_protocol::resolve_session(&mut link, &target.target_id, reference)
+            client_protocol::retry_lookup(retries, || {
+                let mut link = connect_link(&config, &target, flags.address.as_deref(), timeout)?;
+                client_protocol::resolve_session(&mut link, &target.target_id, reference)
+            }, |attempt| {
+                pause_before_retry(attempt, &format!("Resolving host session {attempt}/{retries}"), || false)?;
+                Ok(())
+            })
         }) {
         Ok(resolved) => resolved,
         Err(error) if error.is::<store::RecoveryBlocked>() => {
@@ -431,9 +459,8 @@ fn run_session(
     let store = std::sync::Arc::new(store);
     let service_store = store.clone();
     let id = state.id;
-    let command = session_command(alias, &SessionReference::parse(&id.to_string())?, retries, &flags, false)?;
     eprintln!("[session] GUID {id}; Ctrl+] detaches without killing the remote shell.");
-    print_recovery(id, &command);
+    print_session_recovery(alias, &state, retries, &flags)?;
     let mut owner = Owner::start(root, &target.target_id, alias, id, state.reference.clone())?;
     let snapshot = std::sync::Arc::new(std::sync::Mutex::new(state.clone()));
     let service_snapshot = snapshot.clone();
@@ -474,21 +501,14 @@ fn run_session(
             if attempt > 0 {
                 owner.set_state("reconnecting");
                 terminal.reading(false);
-                let jitter = u16::from_le_bytes(store::random_claim()?[..2].try_into().unwrap())
-                    as u64
-                    % 251;
-                let delay = (500u64 * (1u64 << (attempt - 1).min(6))).min(15_000) + jitter;
-                eprintln!("[session] Reconnecting {attempt}/{retries} in {delay}ms; reusing {id}");
-                for _ in 0..(delay / 25 + 1) {
-                    if owner.detached() { return Ok(0); }
-                    thread::sleep(Duration::from_millis(25));
-                }
+                if !pause_before_retry(attempt, &format!("Reconnecting {attempt}/{retries}; reusing {id}"),
+                    || owner.detached())? { return Ok(0); }
             }
             let mut link = match connect_link(&config, &target, flags.address.as_deref(), timeout) {
                 Ok(link) => link,
                 Err(error) => {
                     eprintln!("[session] Connection failed: {error:#}");
-                    print_recovery(id, &command);
+                    print_session_recovery(alias, &engine.state, retries, &flags)?;
                     if error.is::<LoginRequired>() {
                         owner.set_state("auth_required");
                         return Err(error);
@@ -500,8 +520,11 @@ fn run_session(
                 let mut snapshot = snapshot.lock().unwrap();
                 let mut updated = state.clone();
                 updated.merge_ended(&snapshot)?;
+                let creation_confirmed = snapshot.mode == store::SessionMode::CreatePending
+                    && updated.mode == store::SessionMode::Attached && !updated.ended;
                 store.save(&updated)?;
                 *snapshot = updated;
+                if creation_confirmed { print_session_recovery(alias, &snapshot, retries, &flags)?; }
                 Ok(())
             });
             let end = match end {
@@ -528,7 +551,7 @@ fn run_session(
                     owner.set_state("reconnecting");
                     terminal.reading(false);
                     eprintln!("{ATTACHMENT_LOST_MESSAGE}");
-                    print_recovery(id, &command);
+                    print_session_recovery(alias, &engine.state, retries, &flags)?;
                 }
             }
         }
@@ -538,7 +561,7 @@ fn run_session(
     drop(terminal);
     if result.is_err() {
         eprintln!("[session] Automatic recovery stopped. The saved GUID does not guarantee the remote session is still alive.");
-        print_recovery(id, &command);
+        print_session_recovery(alias, &engine.state, retries, &flags)?;
     }
     result
 }

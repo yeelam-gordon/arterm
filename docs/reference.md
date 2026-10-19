@@ -291,12 +291,20 @@ explicitly reused with `connect`, but an old GUID never revives. A saved alias p
 its old GUID and will not silently follow a name reused by another client; use the
 new GUID explicitly. Host inventory includes canonical aliases.
 
-Fresh lookups complete before publishing local recovery state. Failed or missing
-lookups do not reserve local references. Creation state is persisted before remote
+Fresh lookups complete before publishing local recovery state. Failed lookups and
+missing existing-only lookups do not reserve local references. Creation state is persisted before remote
 creation. Exclusive
 locks prevent concurrent local use from creating duplicate sessions. Missing,
 corrupt, incomplete, expired, or unauthorized recovery records fail closed.
 Do not delete them to troubleshoot a connection.
+
+Read-only host resolution honors `--retries` with the same bounded backoff as
+attachment reconnects. Transient connection/timeout failures can retry;
+authentication and protocol rejection are terminal.
+
+Until creation is confirmed, printed recovery guidance retries `connect` with the
+saved name and original creation identity. Once confirmed, guidance switches to
+existing-only `resume` with the GUID; it is recomputed from current recovery state.
 
 Protected schema-2 state records explicit create-pending, attach-only, or attached
 intent, independently of authentication. Valid schema-1 records migrate without

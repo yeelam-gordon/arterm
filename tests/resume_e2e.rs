@@ -165,37 +165,7 @@ impl Fixture {
         if verb == "connect" {
             command.args(["--shell", &test_shell()]);
         }
-        let mut child = command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let input = child.stdin.take().unwrap();
-        let out = child.stdout.take().unwrap();
-        let err = child.stderr.take().unwrap();
-        let (tx, rx) = mpsc::channel();
-        for (stderr, mut reader) in [
-            (false, Box::new(out) as Box<dyn Read + Send>),
-            (true, Box::new(err) as Box<dyn Read + Send>),
-        ] {
-            let tx = tx.clone();
-            thread::spawn(move || {
-                let mut bytes = [0; 4096];
-                while let Ok(n) = reader.read(&mut bytes) {
-                    if n == 0 || tx.send((stderr, bytes[..n].to_vec())).is_err() {
-                        break;
-                    }
-                }
-            });
-        }
-        RunningClient {
-            child,
-            input,
-            rx,
-            out: String::new(),
-            err: String::new(),
-        }
+        RunningClient::spawn(command)
     }
 }
 impl Drop for Fixture {
@@ -219,6 +189,27 @@ pub(crate) struct RunningClient {
     err: String,
 }
 impl RunningClient {
+    fn spawn(mut command: Command) -> Self {
+        let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped())
+            .stderr(Stdio::piped()).spawn().unwrap();
+        let input = child.stdin.take().unwrap();
+        let out = child.stdout.take().unwrap();
+        let err = child.stderr.take().unwrap();
+        let (tx, rx) = mpsc::channel();
+        for (stderr, mut reader) in [
+            (false, Box::new(out) as Box<dyn Read + Send>),
+            (true, Box::new(err) as Box<dyn Read + Send>),
+        ] {
+            let tx = tx.clone();
+            thread::spawn(move || {
+                let mut bytes = [0; 4096];
+                while let Ok(n) = reader.read(&mut bytes) {
+                    if n == 0 || tx.send((stderr, bytes[..n].to_vec())).is_err() { break; }
+                }
+            });
+        }
+        Self { child, input, rx, out: String::new(), err: String::new() }
+    }
     pub(crate) fn wait_for(&mut self, predicate: impl Fn(&str, &str) -> bool) {
         let deadline = Instant::now() + Duration::from_secs(30);
         while !predicate(&self.out, &self.err) {
@@ -314,6 +305,8 @@ struct CreationGate {
     release: std::sync::atomic::AtomicBool,
     occurrence: usize,
     seen: std::sync::atomic::AtomicUsize,
+    reject_after_first: usize,
+    reject_first: usize,
     hide_file_capability: bool,
     hide_metadata_capability: bool,
     hide_directory_capability: bool,
@@ -334,6 +327,7 @@ fn relay_with_creation_gate(home: PathBuf, attachments: usize, trace: Option<Arc
     thread::spawn(move || {
         let remaining = Arc::new(std::sync::atomic::AtomicUsize::new(attachments));
         let deadline = Instant::now() + Duration::from_secs(120);
+        let mut connection_attempt = 0;
         while remaining.load(std::sync::atomic::Ordering::Acquire) > 0 && Instant::now() < deadline {
             let (mut incoming, _) = match listener.accept() {
                 Ok(pair) => pair,
@@ -343,6 +337,13 @@ fn relay_with_creation_gate(home: PathBuf, attachments: usize, trace: Option<Arc
                 }
                 Err(error) => panic!("fixture accept: {error}"),
             };
+            let reject = gate.as_ref().is_some_and(|gate| connection_attempt < gate.reject_first
+                || (connection_attempt > 0 && connection_attempt <= gate.reject_after_first));
+            connection_attempt += 1;
+            if reject {
+                incoming.shutdown(Shutdown::Both).unwrap();
+                continue;
+            }
             let remaining = remaining.clone();
             let home = home.clone();
             let tx = tx.clone();
@@ -2046,6 +2047,79 @@ fn real_shell_survives_network_loss_detach_and_resume() {
 
 #[test]
 #[ignore = "explicit functional fixture feature or trusted SIGNED_CLIENT/SIGNED_HOST required"]
+fn fresh_lookup_retries_before_publishing_local_state() {
+    use std::sync::atomic::Ordering;
+    let fixture = Fixture::new();
+    let gate = Arc::new(CreationGate { reject_first: 1, frame: "HelloOk", ..CreationGate::default() });
+    let (address, _) = relay_with_creation_gate(fixture.home.clone(), 1, None, Some(gate.clone()));
+    let mut client = fixture.client("connect", Some("lookup-retry"), &address);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !gate.observed.load(Ordering::Acquire) {
+        assert!(Instant::now() < deadline, "lookup was not retried after a transient connection failure");
+        thread::sleep(Duration::from_millis(10));
+    }
+    let published_early = fixture.home.join("client").join("sessions").exists();
+    gate.release.store(true, Ordering::Release);
+    assert!(!published_early, "lookup published local state before a successful response");
+    client.command("Write-Output ('LOOKUP_RETRY=' + $PID + ':ready')");
+    client.wait_for(|out, _| pid_marker(out, "LOOKUP_RETRY=", ":ready").is_some());
+    let inventory = fixture.host_command("sessions").arg("--json").output().unwrap();
+    let sessions: serde_json::Value = serde_json::from_slice(&inventory.stdout).unwrap();
+    assert_eq!(sessions.as_array().unwrap().len(), 1);
+    assert_eq!(sessions[0]["id"], client.guid());
+    client.detach();
+}
+
+#[test]
+#[ignore = "explicit functional fixture feature or trusted SIGNED_CLIENT/SIGNED_HOST required"]
+fn printed_pending_create_retry_preserves_identity_then_switches_to_guid_resume() {
+    let fixture = Fixture::new();
+    let gate = Arc::new(CreationGate { reject_after_first: 3, ..CreationGate::default() });
+    let (address, _) = relay_with_creation_gate(fixture.home.clone(), 1, None, Some(gate));
+    let mut failed = fixture.client("connect", Some("retry-create"), &address);
+    failed.wait_exit(1);
+    let id = failed.guid();
+    let config = arterm::client_config::load(&fixture.home).unwrap();
+    let target = &config.targets["fixture"];
+    let dir = arterm::client_config::state_dir(&fixture.home, target);
+    let read_state = || {
+        let bytes = fs::read(dir.join(format!("{id}.dpapi"))).unwrap();
+        serde_json::from_slice::<serde_json::Value>(&arterm::store::protect(&bytes, false).unwrap()).unwrap()
+    };
+    let before = read_state();
+    assert_eq!(before["mode"], "create_pending");
+    assert!(before["origin"].is_null(), "connection failure must precede CreateSession");
+    let inventory = fixture.host_command("sessions").arg("--json").output().unwrap();
+    assert!(serde_json::from_slice::<serde_json::Value>(&inventory.stdout).unwrap().as_array().unwrap().is_empty());
+    let printed = failed.err.lines().filter_map(|line| line.strip_prefix("[session] Resume command: "))
+        .last().expect("missing retry command").to_owned();
+    assert!(printed.contains("connect 'fixture' retry-create"), "{printed}");
+
+    let mut command = Command::new("powershell.exe");
+    command.env("VSTERM_REMOTE_HOME", &fixture.home).env("TEMP", &fixture.home).env("TMP", &fixture.home)
+        .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", &printed]);
+    let mut retry = RunningClient::spawn(command);
+    let resumed = format!("resume 'fixture' {id}");
+    retry.wait_for(|_, err| err.lines().any(|line|
+        line.starts_with("[session] Resume command: ") && line.contains(&resumed)));
+    let after = read_state();
+    assert_eq!(after["mode"], "attached");
+    for field in ["id", "request_id", "client_id", "shell", "args", "cwd", "create_epoch"] {
+        assert_eq!(after[field], before[field], "retry replaced {field}");
+    }
+    let inventory = fixture.host_command("sessions").arg("--json").output().unwrap();
+    let sessions: serde_json::Value = serde_json::from_slice(&inventory.stdout).unwrap();
+    assert_eq!(sessions.as_array().unwrap().len(), 1);
+    assert_eq!(sessions[0]["id"], id);
+    let detached = Command::new(controller_executable()).env("VSTERM_REMOTE_HOME", &fixture.home)
+        .args(["detach", "fixture", &id, "--json"]).output().unwrap();
+    assert!(detached.status.success(), "{}", String::from_utf8_lossy(&detached.stderr));
+    retry.wait_exit(0);
+    fixture.wait_for_session_state(&id, false, false);
+}
+
+#[test]
+#[ignore = "explicit functional fixture feature or trusted SIGNED_CLIENT/SIGNED_HOST required"]
 fn fresh_client_roots_resume_host_guid_and_alias_without_recovery_files() {
     let fixture = Fixture::new();
     let (addr, _) = relay(fixture.home.clone(), 8);
@@ -2103,13 +2177,15 @@ fn intentional_remote_exit_ends_the_client_without_recovery_instructions() {
         client.wait_for(|out, _| pid_marker(out, "READY=", ":exit").is_some());
         let _connection = connections.recv_timeout(Duration::from_secs(5)).unwrap();
         let retired_id = client.guid();
+        client.wait_for(|_, err| err.contains(&format!("resume 'fixture' {retired_id}")));
+        let recovery_commands = client.err.matches("Resume command:").count();
         client.command(&format!("exit {code}"));
         client.wait_exit(code);
         assert!(client.err.contains(&format!("Remote exit code: {code}")), "{}", client.err);
         assert!(!client.err.contains("Reconnecting"), "{}", client.err);
         assert!(!client.err.contains("Attachment lost"), "{}", client.err);
-        assert_eq!(client.err.matches("Resume command:").count(), 1,
-            "only initial startup may print the resume command: {}", client.err);
+        assert_eq!(client.err.matches("Resume command:").count(), recovery_commands,
+            "remote exit must not print new recovery guidance: {}", client.err);
         let mut later = fixture.client("connect", Some(&retired_id), &addr);
         later.wait_exit(1);
         assert!(later.err.contains("already retired"), "{}", later.err);

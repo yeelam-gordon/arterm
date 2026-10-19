@@ -258,7 +258,8 @@ fn real_conpty_pid_and_state_survive_pipe_disconnect() {
     let lease = binary(body, "lease_id").unwrap();
     // Simulate a quiet/cold shell for longer than the production watchdog.
     // The test peer must maintain liveness; increasing the watchdog would hide this bug.
-    let quiet_command = format!("Start-Sleep -Seconds {}; $global:KeepMe='resumable'; Write-Output ('FIRST=' + $PID + ':' + $global:KeepMe)\r\n",
+    // Match a terminal Enter; LF is a separate PSReadLine editing key.
+    let quiet_command = format!("Start-Sleep -Seconds {}; $global:KeepMe='resumable'; Write-Output ('FIRST=' + $PID + ':' + $global:KeepMe)\r",
         PEER_IDLE_TIMEOUT.as_secs() + 1);
     let quiet_started = Instant::now();
     one.send(input(
@@ -313,7 +314,7 @@ fn real_conpty_pid_and_state_survive_pipe_disconnect() {
         &lease2,
         &client,
         2,
-        b"Write-Output ('SECOND=' + $PID + ':' + $global:KeepMe)\r\n",
+        b"Write-Output ('SECOND=' + $PID + ':' + $global:KeepMe)\r",
     ));
     let second = marker(&mut two, id, &mut cursor, ":resumable");
     assert!(second.contains(&format!("SECOND={shell_pid}:resumable")));
