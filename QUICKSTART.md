@@ -752,6 +752,11 @@ process injection, or code invoking the legitimate CLI.
 <details>
 <summary>Legacy hosts and existing installations</summary>
 
+**Upgrading to 0.8.0:** update both the client and host; this release changes the
+session protocol contract. Finish existing sessions with their matching older
+client before upgrading or restarting the host. A broker restart ends its shells;
+saved recovery records do not restore them.
+
 `connect` and `resume` require `owner-authorized-resume-v1` and
 `ended-session-rejection`. Older hosts fail before creation or attachment;
 new hosts reject older clients. There is no token-based compatibility fallback.

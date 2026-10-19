@@ -416,6 +416,10 @@ canonical and legacy runtime filenames and do not bypass live-session guards
 when only an old executable name exists. Older DevBox Remote prototype state
 is left untouched and is not automatically imported.
 
+Version **0.8.0 requires upgrading both client and host**. Finish existing sessions
+with the matching older client before upgrading/restarting their host: broker
+restart does not preserve the running shells or permit rebinding old recovery state.
+
 `connect` and `resume` require `owner-authorized-resume-v1` and
 `ended-session-rejection`. Unsupported hosts fail before session mutation;
 new hosts reject clients without owner-resume negotiation. There is no legacy

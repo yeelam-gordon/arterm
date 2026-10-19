@@ -427,7 +427,8 @@ fn run_session(
     create: bool,
     flags: ConnectionFlags,
 ) -> Result<u32> {
-    let console = Console::new(flags.stdio)?;
+    let interactive = Console::is_terminal();
+    if !flags.stdio && !interactive { arterm::diagnostics::nonblocking(); }
     let config = client_config::load(root)?;
     let target = client_config::target(&config, alias)?.clone();
     let retries = flags.retries.unwrap_or(DEFAULT_RETRIES);
@@ -435,6 +436,8 @@ fn run_session(
     let state_dir = client_config::state_dir(root, &target);
     let (store, state) = match Store::resolve_with_host(&state_dir, &target.target_id, reference, create,
         flags.shell.as_deref(), flags.cwd.as_deref(), &mut |reference| {
+            eprintln!("[session] Resolving host reference {} before terminal attachment.{}",
+                reference.as_str(), if interactive { " Ctrl+C cancels lookup." } else { "" });
             client_protocol::retry_lookup(retries, || {
                 let mut link = connect_link(&config, &target, flags.address.as_deref(), timeout)?;
                 client_protocol::resolve_session(&mut link, &target.target_id, reference)
@@ -462,6 +465,7 @@ fn run_session(
     eprintln!("[session] GUID {id}; Ctrl+] detaches without killing the remote shell.");
     print_session_recovery(alias, &state, retries, &flags)?;
     let mut owner = Owner::start(root, &target.target_id, alias, id, state.reference.clone())?;
+    let console = Console::new(flags.stdio)?;
     let snapshot = std::sync::Arc::new(std::sync::Mutex::new(state.clone()));
     let service_snapshot = snapshot.clone();
     let service_config = config.clone();

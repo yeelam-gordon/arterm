@@ -129,7 +129,10 @@ impl Bridge {
         input.flush().unwrap();
     }
     fn recv(&mut self) -> Value {
-        let value = self.output.recv_timeout(Duration::from_secs(15))
+        self.recv_until(Instant::now() + Duration::from_secs(15))
+    }
+    fn recv_until(&mut self, deadline: Instant) -> Value {
+        let value = self.output.recv_timeout(deadline.saturating_duration_since(Instant::now()))
             .expect("host-core protocol receive deadline or closed bridge");
         if std::env::var_os("ARTERM_TEST_TRACE").is_some() {
             let kind = text(&value, "type").unwrap();
@@ -178,11 +181,18 @@ impl Drop for Bridge {
     }
 }
 fn receive_command_state(bridge: &mut Bridge, id: Option<Uuid>, expected: &str) -> (Value, String) {
+    receive_command_state_with_output(bridge, id, expected, |_| true)
+}
+// Completion events and PTY output can arrive separately.
+fn receive_command_state_with_output(
+    bridge: &mut Bridge, id: Option<Uuid>, expected: &str, output_ready: impl Fn(&str) -> bool,
+) -> (Value, String) {
     let mut output = Vec::new();
+    let mut matched = None;
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         assert!(Instant::now() < deadline, "command event deadline; expected={expected}; output_bytes={}", output.len());
-        let response = bridge.recv();
+        let response = bridge.recv_until(deadline);
         let kind = text(&response, "type").unwrap();
         let body = get(&response, "body").unwrap();
         if kind == "Output" { output.extend(binary(body, "bytes").unwrap()); }
@@ -191,13 +201,17 @@ fn receive_command_state(bridge: &mut Bridge, id: Option<Uuid>, expected: &str) 
                 if let Some(record) = get(body, "records").unwrap().as_array().unwrap().iter()
                     .find(|record| text(record, "command_id").unwrap() == id.to_string()
                         && text(record, "state").unwrap() == expected) {
-                    return (record.clone(), String::from_utf8_lossy(&output).into_owned());
+                    matched = Some(record.clone());
                 }
             } else if text(body, "shell_status").unwrap() == expected {
-                return (body.clone(), String::from_utf8_lossy(&output).into_owned());
+                matched = Some(body.clone());
             }
         }
         assert_ne!(kind, "CommandRejected", "{response:?}");
+        if let Some(record) = &matched {
+            let text = String::from_utf8_lossy(&output);
+            if output_ready(&text) { return (record.clone(), text.into_owned()); }
+        }
     }
 }
 
@@ -240,14 +254,17 @@ fn collect_marker(bridge: &mut Bridge, id: Uuid, after: &mut u64, needle: &str) 
     }
 }
 fn marker_pid(text: &str, prefix: &str) -> String {
-    if let Some(pid) = find_marker_pid(text, prefix) { return pid; }
+    rendered_marker_pid(text, prefix)
+        .unwrap_or_else(|| panic!("missing PID marker {prefix:?}; raw fixture output: {text:?}"))
+}
+fn rendered_marker_pid(text: &str, prefix: &str) -> Option<String> {
+    if let Some(pid) = find_marker_pid(text, prefix) { return Some(pid); }
     // ConPTY may redraw or wrap a marker across VT records. Match the rendered
     // screen too, rather than requiring one raw contiguous byte spelling.
     let mut terminal = vt100::Parser::new(30, 100, 0);
     terminal.process(text.as_bytes());
     let rendered = terminal.screen().contents().replace(['\r', '\n'], "");
     find_marker_pid(&rendered, prefix)
-        .unwrap_or_else(|| panic!("missing PID marker {prefix:?}; raw fixture output: {text:?}; rendered: {rendered:?}"))
 }
 fn find_marker_pid(text: &str, prefix: &str) -> Option<String> {
     text.match_indices(prefix)
@@ -267,6 +284,10 @@ fn pid_markers_survive_terminal_wrapping_and_style_records() {
     assert_eq!(marker_pid("FIRST=\x1b[32m12345\x1b[0m:resumable", "FIRST="), "12345");
     assert_eq!(marker_pid("SECOND=12\r\n345:resumable", "SECOND="), "12345");
     assert_eq!(find_marker_pid("FIRST=$PID:resumable", "FIRST="), None);
+    let echo = "Write-Output ('FIRST='+$PID+':resumable')\r\n";
+    assert_eq!(rendered_marker_pid(echo, "FIRST="), None);
+    assert_eq!(rendered_marker_pid(&format!("{echo}FIRST=123"), "FIRST="), None);
+    assert_eq!(rendered_marker_pid(&format!("{echo}FIRST=123:resumable"), "FIRST="), Some("123".into()));
 }
 fn create_message(request: Uuid, id: Uuid, broker: &[u8]) -> Value {
     message(
@@ -448,7 +469,8 @@ fn managed_commands_preserve_runspace_and_report_real_completion() {
     let code = format!("$Keep=41; Set-Location -LiteralPath '{path}'; Write-Output ('FIRST='+$PID+':resumable')");
     let started = Instant::now();
     bridge.send(submit(first, &code));
-    let (record, output) = receive_command_state(&mut bridge, Some(first), "completed");
+    let (record, output) = receive_command_state_with_output(&mut bridge, Some(first), "completed",
+        |output| rendered_marker_pid(output, "FIRST=").is_some());
     assert!(started.elapsed() < Duration::from_secs(5), "completion waited instead of observing shell event");
     assert_eq!(get(&record, "succeeded").unwrap().as_bool(), Some(true), "{output}");
     let pid = marker_pid(&output, "FIRST=");
@@ -457,7 +479,8 @@ fn managed_commands_preserve_runspace_and_report_real_completion() {
     let second = Uuid::now_v7();
     let second_code = "$Keep++; Write-Output ('SECOND='+$PID+':resumable'); Write-Output ('VALUE='+$Keep); Write-Output ('DIR='+$PWD.Path); $cwdSentinel=Get-Content -LiteralPath 'cwd-sentinel.txt' -Raw -ErrorAction Stop; Set-Content -LiteralPath 'cwd-proof.txt' -Value ($PID.ToString()+'|'+$Keep+'|'+$cwdSentinel) -Encoding Ascii -NoNewline -ErrorAction Stop";
     bridge.send(submit(second, second_code));
-    let (record, output) = receive_command_state(&mut bridge, Some(second), "completed");
+    let (record, output) = receive_command_state_with_output(&mut bridge, Some(second), "completed",
+        |output| rendered_marker_pid(output, "SECOND=").is_some() && output.contains("VALUE=42"));
     assert_eq!(get(&record, "succeeded").unwrap().as_bool(), Some(true), "{output}");
     assert_eq!(marker_pid(&output, "SECOND="), pid);
     assert!(output.contains("VALUE=42"), "{output}");
@@ -512,7 +535,8 @@ fn managed_commands_preserve_runspace_and_report_real_completion() {
     assert_eq!(get(&record, "succeeded").unwrap().as_bool(), Some(false));
     let after = Uuid::now_v7();
     bridge.send(submit(after, "Write-Output ('AFTER='+$PID+':resumable'); Write-Output ('VALUE='+$Keep)"));
-    let (_, output) = receive_command_state(&mut bridge, Some(after), "completed");
+    let (_, output) = receive_command_state_with_output(&mut bridge, Some(after), "completed",
+        |output| rendered_marker_pid(output, "AFTER=").is_some() && output.contains("VALUE=42"));
     assert_eq!(marker_pid(&output, "AFTER="), pid);
     assert!(output.contains("VALUE=42"), "{output}");
     let detached = Uuid::now_v7();
