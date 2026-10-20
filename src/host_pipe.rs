@@ -205,7 +205,7 @@ fn open(path: &Path, deadline: Instant) -> Result<File> {
                     message.push_str(
                         "; no broker pipe was found in this scope. On the remote host, run \
                          `arterm-host start` using the same Windows user, logon session, and \
-                         data root (VSTERM_REMOTE_HOME; default: %LOCALAPPDATA%\\VsTerm) \
+                         data root (VSTERM_REMOTE_HOME; default: %LOCALAPPDATA%\\arTerm, reusing existing VsTerm) \
                          as the bridge. If the host is already running, check those scopes. \
                          Restarting a broker does not restore its old sessions",
                     );

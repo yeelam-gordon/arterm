@@ -4,6 +4,12 @@ These are **self-signed development builds**. Their certificate is not publicly
 trusted; installation requires explicit local trust where permitted.
 Organizational application-control rules still apply.
 
+Before downloads or sign-in, read [Privacy and local data](PRIVACY.md).
+Packages built from this source must additionally include `PRIVACY.md` in their
+checksummed payload; installed executables expose the same notice with
+`--privacy`. This is a source packaging requirement, not a claim that the
+already-published v0.7.1 archives contain this new file or telemetry default.
+
 The development-signed download contains four signed EXEs, the MIT `LICENSE`,
 `THIRD-PARTY-NOTICES.txt`, the public `arTerm-Dev.cer`, this guide, and checksums.
 It must never contain a PFX or private key. Public CI artifacts and ordinary

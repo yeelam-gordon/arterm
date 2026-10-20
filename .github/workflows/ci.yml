@@ -56,14 +56,24 @@ jobs:
         run: |
           cargo run --locked --release --bin package -- --target ${{ matrix.target }}
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test offline privacy on the exact packaged executables
+        shell: pwsh
+        run: |
+          $env:ARTERM_PRIVACY_PACKAGE_DIR = (Resolve-Path 'dist\windows-${{ matrix.arch }}').Path
+          cargo test --locked --target ${{ matrix.target }} --test privacy_defaults -- --ignored --exact packaged_privacy_is_available_offline_without_a_data_root --test-threads=1 2>&1 |
+            Tee-Object -Variable privacyOutput
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (($privacyOutput -join "`n") -notmatch '(?m)^test result: ok\. 1 passed; 0 failed; 0 ignored;') {
+            throw 'The exact packaged privacy gate must execute once and pass, with none ignored.'
+          }
       - name: Validate unsigned artifact allowlist
         shell: pwsh
         run: |
           Set-Location 'dist\windows-${{ matrix.arch }}'
           $allowed = @('arterm.exe','arterm-host.exe','arTerm-Client-Setup.exe',
-                       'arTerm-Host-Setup.exe','LICENSE','THIRD-PARTY-NOTICES.txt','SHA256SUMS')
+                       'arTerm-Host-Setup.exe','LICENSE','THIRD-PARTY-NOTICES.txt','PRIVACY.md','SHA256SUMS')
           $entries = @(Get-ChildItem -LiteralPath . -Force)
-          if ($entries.Count -ne $allowed.Count) { throw 'Unsigned artifact must contain exactly seven files.' }
+          if ($entries.Count -ne $allowed.Count) { throw 'Unsigned artifact must contain exactly eight files.' }
           foreach ($entry in $entries) {
             if ($entry.PSIsContainer -or $entry.Name -cnotin $allowed -or
                 ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
@@ -90,6 +100,7 @@ jobs:
             dist\windows-${{ matrix.arch }}\arTerm-Host-Setup.exe
             dist\windows-${{ matrix.arch }}\LICENSE
             dist\windows-${{ matrix.arch }}\THIRD-PARTY-NOTICES.txt
+            dist\windows-${{ matrix.arch }}\PRIVACY.md
             dist\windows-${{ matrix.arch }}\SHA256SUMS
           if-no-files-found: error
           retention-days: 7

@@ -62,7 +62,8 @@ Usage:\n\
   arterm interrupt MACHINE SESSION [--json] | detach MACHINE SESSION [--json]\n\
   arterm terminate MACHINE SESSION [--json] [--timeout 60s]\n\
   arterm doctor [ALIAS [--timeout 60s]]\n\
-  arterm --help | --version\n\n\
+  arterm --help | --version | --privacy\n\n\
+Privacy: read packaged PRIVACY.md or arterm --privacy before downloads/sign-in.\n\
 Client Setup initializes local files. setup is optional repair/custom-path configuration, not sign-in.\n\
 Network commands renew positively missing/expired sign-in once; use arterm --login for interactive GitHub sign-in with the host's account.\n\
 list shows local session references without network or sign-in; completed/proven nonresumable sessions are retired.\n\
@@ -174,6 +175,7 @@ fn run_vendor(path: &Path, args: &[&str]) -> Result<()> {
 }
 
 fn setup(root: &Path, args: &[String]) -> Result<()> {
+    eprintln!("{}", deployment::PRIVACY_NOTICE);
     let mut override_path = None;
     let mut no_download = false;
     let mut index = 0;
@@ -789,6 +791,10 @@ fn local_command(root: &Path, args: &[String]) -> Result<u32> {
 }
 
 fn command(args: &[String]) -> Result<u32> {
+    if args == ["--privacy"] {
+        println!("{}", deployment::PRIVACY);
+        return Ok(0);
+    }
     let root = deployment::data_root()?;
     match args.first().map(String::as_str) {
         Some("setup") => {
@@ -797,6 +803,7 @@ fn command(args: &[String]) -> Result<u32> {
         }
         Some("login" | "--login") => {
             ensure!(args.len() == 1, "arterm --login / login accepts no extra arguments");
+            eprintln!("{}", deployment::PRIVACY_NOTICE);
             let config = client_config::load(&root)?;
             login(devtunnel_path(&config)?)?;
             Ok(0)
