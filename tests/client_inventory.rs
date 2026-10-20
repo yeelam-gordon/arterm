@@ -68,7 +68,7 @@ impl Fixture {
         )
         .unwrap();
         state.origin = Some(vec![7; 16]);
-        state.token = Some(vec![9; 32]);
+        state.mode = store::SessionMode::Attached;
         state.args = vec!["SECRET_COMMAND".into()];
         state.pending = Some(store::PendingInput {
             seq: 1,
@@ -254,13 +254,12 @@ fn unreadable_corrupt_locked_and_identity_mismatched_lifecycles_remain_visible_w
             None,
         );
         state.id = id;
-        state.claim = store::random_claim().unwrap();
         state.ended = true;
         let mut value = serde_json::to_value(state).unwrap();
         match kind {
             "box" => value["box_name"] = "another-target".into(),
             "id" => value["id"] = Uuid::now_v7().to_string().into(),
-            "schema" => value["schema"] = 2.into(),
+            "schema" => value["schema"] = 99.into(),
             _ => {}
         }
         let plain = if kind == "json" {
@@ -453,10 +452,8 @@ fn retirement_cleans_session_data_and_name_reuse_is_fresh_while_old_guid_termina
     assert_ne!(fresh.id, old.id);
     assert_ne!(fresh.client_id, old.client_id);
     assert_ne!(fresh.request_id, old.request_id);
-    assert_ne!(fresh.claim, old.claim);
-    assert_eq!(fresh.claim.len(), 32);
     assert!(
-        fresh.token.is_none()
+        fresh.mode == store::SessionMode::CreatePending
             && fresh.origin.is_none()
             && fresh.pending.is_none()
             && fresh.args.is_empty()
@@ -676,24 +673,30 @@ fn missing_resume_or_broker_binding_stays_unknown_without_network_or_replacement
         let record = Store::open(&fixture.dir, id).unwrap();
         let mut state = record.load(&fixture.target_id, id).unwrap();
         if remove_token {
-            state.token = None;
+            state.mode = store::SessionMode::CreatePending;
+            state.pending = None;
+            record.save(&state).unwrap();
         } else {
             state.origin = None;
+            // Corrupt/unbound legacy data cannot be written by the current store.
+            let path = fixture.dir.join(format!("{id}.dpapi"));
+            fs::write(path, store::protect(&serde_json::to_vec(&state).unwrap(), true).unwrap()).unwrap();
         }
-        record.save(&state).unwrap();
         drop(record);
         let path = fixture.dir.join(format!("{id}.dpapi"));
         let before = fs::read(&path).unwrap();
         let output = fixture.run(&["terminate", "work", name, "--json"]);
         assert_eq!(output.status.code(), Some(1));
-        assert!(String::from_utf8_lossy(&output.stderr).contains("retained"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains(
+            if remove_token { "retained" } else { "unsafe recovery broker binding" }));
         no_secrets(&output);
         assert_eq!(fs::read(path).unwrap(), before);
         if !remove_token {
             let output = fixture.run(&["connect", "work", name, "--stdio", "--retries", "0"]);
             assert_eq!(output.status.code(), Some(1));
-            assert!(String::from_utf8_lossy(&output.stderr).contains("without adopting a broker"));
+            assert!(String::from_utf8_lossy(&output.stderr).contains("unsafe recovery broker binding"));
             no_secrets(&output);
+            continue;
         }
         let (record, loaded) = Store::resolve(
             &fixture.dir,
@@ -754,7 +757,7 @@ fn claimed_completion_never_retires_malformed_ordinary_state_or_authorizes_name_
             "origin-length" => value["origin"] = json!(vec![7; 15]),
             "wrong-id" => value["id"] = Uuid::now_v7().to_string().into(),
             "wrong-box" => value["box_name"] = "another-box".into(),
-            "wrong-schema" => value["schema"] = 2.into(),
+            "wrong-schema" => value["schema"] = 99.into(),
             "bad-pending" => value["pending"]["seq"] = 99.into(),
             "ack-overflow" => value["input_ack"] = u64::MAX.into(),
             "zero-create-epoch" => value["create_epoch"] = 0.into(),
@@ -808,7 +811,6 @@ fn claimed_completion_never_retires_malformed_ordinary_state_or_authorizes_name_
         );
         replacement.id = id;
         replacement.reference = Some(name.into());
-        replacement.claim = store::random_claim().unwrap();
         assert!(
             record.save(&replacement).is_err(),
             "invalid on-disk state must not be overwritten"

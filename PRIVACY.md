@@ -9,8 +9,8 @@ remote Windows machine, not a project-operated session storage service.
 
 | Component | Responsibility |
 |---|---|
-| devtunnel and VS Code tunnel tools | Perform account sign-in and manage their own login tokens, authentication caches and service interactions. These are dependency-managed credentials, not arTerm session-resume tokens. |
-| arTerm | Writes its configuration, session-name mappings, session-recovery records and local diagnostics. Recovery tokens authorize an arTerm session; they are not GitHub passwords or tunnel-account login tokens. |
+| devtunnel and VS Code tunnel tools | Perform account sign-in and manage their own login tokens, authentication caches and service interactions. |
+| arTerm | Writes configuration, session-name mappings, session bookkeeping and local diagnostics. Session identifiers and names locate sessions on your host; they are not login credentials. |
 | Windows | Provides the user-bound DPAPI protection that arTerm calls before writing protected recovery records. |
 | Shells and programs running in a session | Manage their own history, files and application credentials according to their settings. Their storage is separate from arTerm's recovery records. |
 
@@ -26,8 +26,7 @@ Its Code CLI help/version probes use the same telemetry-off option.
 This disables the vendor telemetry covered by that CLI option. It does not
 change an independently started VS Code instance, existing tunnel processes,
 extensions, devtunnel, GitHub, Windows diagnostics, or programs run in a shell.
-An already-running host must be restarted to pick up this source change;
-finish needed sessions first because stopping the host ends them.
+Stopping or restarting the host ends its running sessions.
 
 This is **not** a promise of no network traffic or no third-party data
 collection. Downloads, authentication, tunnel discovery and relay operation
@@ -58,15 +57,16 @@ Windows Apps displays **arTerm Client** / **arTerm Host**.
 - `client\config.json`: local machine aliases, tunnel names/IDs, absolute host
   executable paths, derived target IDs and the selected devtunnel path.
 - `client\sessions\<target-id>`: generated session/request/client IDs, local
-  session-name mappings and recovery records written by arTerm. Recovery includes
+  cached session-name mappings and recovery records written by arTerm. Recovery includes
   the initial shell/arguments/working directory, terminal dimensions, broker
-  identity, arTerm session-resume tokens, sequence/acknowledgement state and
+  identity, session lifecycle state, sequence/acknowledgement state and
   an outstanding unacknowledged input chunk. arTerm clears that chunk when
   acknowledged; this is not a complete command-history recorder or continuous
-  tracking of the shell's working directory. The records may contain secrets.
-  arTerm protects recovery records using Windows user-bound DPAPI; public name mappings and
-  configuration are not encrypted by arTerm. DPAPI is not protection from
-  other software running as that user.
+  tracking of the shell's working directory. Input and launch settings may
+  contain user-provided sensitive information. arTerm uses Windows-provided,
+  user-bound encryption (DPAPI) for these records. Ordinary name mappings and
+  configuration do not use this encryption. DPAPI does not isolate the records
+  from other software running as the same Windows user.
 - `client\active` contains local control registrations, including the machine
   alias, session name/ID, process and pipe identity. Local attachment/forwarding
   locks, control registration and readiness
@@ -77,13 +77,14 @@ Windows Apps displays **arTerm Client** / **arTerm Host**.
   recovery records. arTerm does not override devtunnel's credential-store path;
   its version/platform determines that location and storage protection.
 
-Machine aliases and local session names are local labels, not login/user
-identities. They are not fields in arTerm's session-create/attach protocol.
-The host receives IDs, arTerm session-authorization values, initial
-shell/arguments/cwd and terminal data
-needed for the session. If you reuse an alias as the tunnel name, type it into
-a command, or include it in a transferred file, that value is no longer only
-local. GitHub account identity used for authentication is separate.
+Machine aliases are local labels for configured targets. Session names are
+sent to the host, which maintains their mapping to session IDs; clients can
+cache those mappings locally. Neither kind of name is a login credential.
+The host receives session IDs/names, initial shell/arguments/cwd, connection
+bookkeeping and terminal data needed for the session. If you reuse a machine
+alias as a tunnel name, type it into a command, or include it in a transferred
+file, that value is no longer only local. GitHub account identity used for
+authentication is separate and handled by the tunnel tools.
 
 ## Host, vendor and other retained data
 
@@ -94,8 +95,8 @@ local. GitHub account identity used for authentication is separate.
   authentication/cache data there. Vendor credentials may also use OS-managed stores;
   arTerm does not guarantee that deleting this directory revokes access.
 - `host\requests\<request-id>.dpapi`: arTerm-written, Windows-protected
-  creation/recovery reservations, including request/session IDs, arTerm
-  claim/resume-token values, broker identity, timestamp, initial
+  creation/recovery reservations, including request/session IDs, session names,
+  broker identity, timestamp, initial
   shell/arguments/cwd, dimensions and lifecycle state.
 - `host\broker.json`, locks, startup task registrations and bootstrap files:
   process/root/installation information used to manage the local host.
@@ -118,15 +119,24 @@ local. GitHub account identity used for authentication is separate.
 ## Retention, deletion and support
 
 There is no blanket automatic data-expiry period. Confirmed retired client
-sessions discard recovery secrets, pending input, arguments and cwd, but keep
+sessions discard pending input, arguments and cwd, but keep
 small identity/lifecycle guards and name mappings to prevent unsafe reuse.
 Disconnected or unconfirmed recovery state is deliberately retained.
 Host recovery reservations and append-only vendor logs are not covered by a
 universal expiry rule.
 
+Session bookkeeping applies to the running host/broker instance. A host reboot
+or broker restart ends those shells; saved records cannot restore them or
+replay old input into a replacement session. Machine aliases, tunnel references
+and executable paths remain useful for future connections. Invalidating session
+state does not automatically erase its files, logs or backups.
+
 Uninstall retains recovery data, installer cache and vendor dependencies.
 Before deletion, finish/terminate sessions and stop/disable the owned host task;
-close clients. Deleting recovery records can permanently prevent reconnection.
+close clients. Deleting client session records loses local names, pending-input
+delivery bookkeeping and stale-session guards. It does not terminate a live host
+session; an authorized fresh client can resolve an existing session by its host
+name or GUID. Do not delete records as a way to retry uncertain input.
 After uninstall, you can remove your selected data root and unwanted retained
 files, including any separately configured log/history/transfer locations.
 Do not delete unrelated data or another installation's files.

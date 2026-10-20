@@ -17,7 +17,6 @@ struct Credentials {
     client: Uuid,
     epoch: u64,
     broker: Vec<u8>,
-    token: Vec<u8>,
     attachment: Vec<u8>,
     lease: Vec<u8>,
 }
@@ -51,12 +50,11 @@ impl Admission {
     pub(crate) fn publish(&self, state: &State, attachment: &[u8], lease: &[u8]) -> Result<()> {
         ensure!(!state.ended && attachment.len() == 16 && lease.len() == 16,
             "invalid transfer attachment");
-        let token = state.token.as_ref().context("no transfer authorization")?;
         let broker = state.origin.as_ref().context("no transfer broker")?;
-        ensure!(token.len() == 32 && broker.len() == 16, "invalid transfer authorization");
+        ensure!(state.mode == crate::store::SessionMode::Attached && broker.len() == 16, "invalid transfer authorization");
         *self.0.lock().unwrap() = Some(Credentials {
             generation: Uuid::now_v7(), session: state.id, client: state.client_id,
-            epoch: state.epoch, broker: broker.clone(), token: token.clone(),
+            epoch: state.epoch, broker: broker.clone(),
             attachment: attachment.to_vec(), lease: lease.to_vec(),
         });
         Ok(())
@@ -90,7 +88,6 @@ impl Ticket {
             ("client_instance_id", Value::Binary(c.client.as_bytes().to_vec())),
             ("connection_epoch", c.epoch.into()),
             ("broker_instance_id", Value::Binary(c.broker.clone())),
-            ("resume_token", Value::Binary(c.token.clone())),
             ("attachment_id", Value::Binary(c.attachment.clone())),
             ("lease_id", Value::Binary(c.lease.clone())),
         ])
@@ -103,7 +100,7 @@ mod tests {
 
     fn state() -> State {
         let mut state = State::new("fixture".into(), "powershell.exe".into(), vec![], None);
-        state.token = Some(vec![1; 32]);
+        state.mode = crate::store::SessionMode::Attached;
         state.origin = Some(vec![2; 16]);
         state
     }

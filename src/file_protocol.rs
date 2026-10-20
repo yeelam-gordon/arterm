@@ -338,7 +338,7 @@ pub fn transfer(
             (
                 "capabilities",
                 Value::Array(
-                    [CAPABILITY, transfer_payload::METADATA_CAPABILITY, recipient_metadata::CAPABILITY]
+                    ["owner-authorized-resume-v1", CAPABILITY, transfer_payload::METADATA_CAPABILITY, recipient_metadata::CAPABILITY]
                         .into_iter()
                         .chain(
                             transfer_payload::DIRECTORY_ADAPTER_INSTALLED
@@ -364,7 +364,7 @@ pub fn transfer(
     let capabilities = get(body, "capabilities")?
         .as_array()
         .context("invalid capabilities")?;
-    for capability in [CAPABILITY, transfer_payload::METADATA_CAPABILITY, recipient_metadata::CAPABILITY] {
+    for capability in ["owner-authorized-resume-v1", CAPABILITY, transfer_payload::METADATA_CAPABILITY, recipient_metadata::CAPABILITY] {
         ensure!(
             capabilities.iter().any(|v| v.as_str() == Some(capability)),
             "host does not support {capability}"

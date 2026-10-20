@@ -13,6 +13,17 @@ use uuid::Uuid;
 
 static AUTHENTICATION_TESTS: Mutex<()> = Mutex::new(());
 
+struct HomeGuard(Option<std::ffi::OsString>);
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        match &self.0 {
+            Some(home) => std::env::set_var("VSTERM_REMOTE_HOME", home),
+            None => std::env::remove_var("VSTERM_REMOTE_HOME"),
+        }
+    }
+}
+
 struct Fixture {
     root: PathBuf,
     vendor: PathBuf,
@@ -181,7 +192,7 @@ fn control_connection(
     fs::write(fixture.root.join("address"), &address).unwrap();
     let server = thread::spawn(move || {
         for connection in 0..2 {
-            let deadline = Instant::now() + Duration::from_secs(15);
+            let deadline = Instant::now() + arterm::transport::DEFAULT_CONNECTION_TIMEOUT + Duration::from_secs(5);
             let mut socket = loop {
                 match listener.accept() {
                     Ok((socket, _)) => break socket,
@@ -238,19 +249,47 @@ fn control_connection(
 }
 
 #[test]
+fn default_connection_timeout_allows_forwarding_after_forty_seconds() {
+    let _guard = AUTHENTICATION_TESTS.lock().unwrap();
+    let fixture = Fixture::new();
+    let home = fixture.home("forward_success", true);
+    let _home_guard = HomeGuard(std::env::var_os("VSTERM_REMOTE_HOME"));
+    std::env::set_var("VSTERM_REMOTE_HOME", &home);
+    fs::write(fixture.root.join("forward-delay-ms"), b"41000").unwrap();
+    let started = Instant::now();
+    let link = control_connection(&fixture, true).unwrap();
+    assert!(started.elapsed() >= Duration::from_secs(41));
+    assert!(started.elapsed() < Duration::from_secs(65));
+    drop(link);
+}
+
+#[test]
+fn explicit_connection_timeout_bounds_doctor_and_server_inventory() {
+    let _guard = AUTHENTICATION_TESTS.lock().unwrap();
+    let fixture = Fixture::new();
+    for args in [
+        vec!["doctor", "fixture", "--timeout", "1s"],
+        vec!["list", "--server", "fixture", "--timeout", "1s", "--json"],
+    ] {
+        let home = fixture.home("forward_stall", true);
+        let started = Instant::now();
+        let output = run(&home, &args);
+        let elapsed = started.elapsed();
+        assert!(!output.status.success());
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        assert!(diagnostic.contains("within 1 seconds; 0 candidate(s) examined"), "{diagnostic}");
+        assert!(elapsed >= Duration::from_secs(1), "{elapsed:?}");
+        assert!(elapsed < Duration::from_secs(10), "{elapsed:?}");
+        assert_eq!(fixture.calls("connect"), 1);
+        assert_eq!(fixture.calls("login-hidden"), 0);
+    }
+}
+
+#[test]
 fn authentication_rearms_only_after_an_established_control_connection() {
     let _guard = AUTHENTICATION_TESTS.lock().unwrap();
     let fixture = Fixture::new();
     let home = fixture.home("forward_success", false);
-    struct HomeGuard(Option<std::ffi::OsString>);
-    impl Drop for HomeGuard {
-        fn drop(&mut self) {
-            match &self.0 {
-                Some(home) => std::env::set_var("VSTERM_REMOTE_HOME", home),
-                None => std::env::remove_var("VSTERM_REMOTE_HOME"),
-            }
-        }
-    }
     let _home_guard = HomeGuard(std::env::var_os("VSTERM_REMOTE_HOME"));
     std::env::set_var("VSTERM_REMOTE_HOME", &home);
     for episode in 1..=2 {

@@ -60,6 +60,19 @@ host registration. Once configured, connect locally with a new session name:
 arterm connect my-devbox MyWork --shell powershell
 ```
 
+An authorized fresh client can resume the same host session without copying
+client recovery files:
+
+```powershell
+arterm resume my-devbox MyWork
+# Or: arterm resume my-devbox <session-guid>
+```
+
+The host owns session aliases. Resume and GUID lookup never create sessions;
+`connect` can create an absent alias. Saved aliases stay pinned to their GUID.
+The verified host Windows owner/session boundary authorizes access, not a
+per-session token. Both peers must support `owner-authorized-resume-v1`.
+
 ## Prove that you returned to the same shell
 
 Follow the guide's [complete detach/reconnect proof](QUICKSTART.md#prove-that-you-returned-to-the-same-shell).

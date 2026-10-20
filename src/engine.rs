@@ -1,7 +1,7 @@
 use crate::diagnostics;
 use crate::{
     console::{Input, Terminal},
-    store::{PendingInput, State},
+    store::{PendingInput, SessionMode, State},
     transport::{Link, Poll},
     wire::{bin16, binary, get, map, message, num, s, text},
 };
@@ -16,6 +16,7 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 pub const CAPS: &[&str] = &[
+    "owner-authorized-resume-v1",
     "session-create",
     "create-reservation",
     "session-resume",
@@ -37,7 +38,7 @@ pub enum End {
 pub struct SessionRejected;
 impl std::fmt::Display for SessionRejected {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("host rejected the saved session credential; remote existence is not confirmed")
+        f.write_str("host rejected the saved session identity; remote existence is not confirmed")
     }
 }
 impl std::error::Error for SessionRejected {}
@@ -51,7 +52,6 @@ pub struct Engine {
     pending_sent: bool,
     resize_generation: u64,
     last_size: (u16, u16),
-    allow_legacy_resume: bool,
     command_capable: bool,
     active_command: Option<uuid::Uuid>,
     command_input_ready: bool,
@@ -107,6 +107,7 @@ mod tests {
         unavailable: bool,
         reject_input: Option<&'static str>,
         supports_ended_rejection: bool,
+        supports_owner_resume: bool,
         supports_commands: bool,
         exit_on_attach: Option<u32>,
     }
@@ -127,6 +128,7 @@ mod tests {
                 unavailable: false,
                 reject_input: None,
                 supports_ended_rejection: true,
+                supports_owner_resume: true,
                 supports_commands: false,
                 exit_on_attach: None,
             }
@@ -148,6 +150,7 @@ mod tests {
                         (
                             "capabilities",
                             Value::Array(CAPS.iter().copied()
+                                .filter(|cap| self.supports_owner_resume || *cap != "owner-authorized-resume-v1")
                                 .chain(self.supports_ended_rejection.then_some(ENDED_SESSION_CAPABILITY))
                                 .chain(self.supports_commands.then_some(crate::shell_integration::CAPABILITY))
                                 .map(s).collect()),
@@ -173,7 +176,6 @@ mod tests {
                         "SessionCreated",
                         vec![
                             ("session_id", s(&self.id)),
-                            ("resume_token", Value::Binary(vec![2; 32])),
                             ("requires_attach", self.recovered.into()),
                             ("recovered", self.recovered.into()),
                             ("attachment_id", Value::Binary(vec![3; 16])),
@@ -270,16 +272,14 @@ mod tests {
         }
     }
     fn state() -> State {
-        let mut s = State::new("box".into(), "pwsh".into(), vec![], None);
-        s.claim = vec![7; 32];
-        s
+        State::new("box".into(), "pwsh".into(), vec![], None)
     }
     #[test]
     fn reusable_connect_rejects_legacy_host_before_create_or_attach() {
         for saved_token in [true, false] {
             let mut state = state();
             if saved_token {
-                state.token = Some(vec![2; 32]);
+                state.mode = SessionMode::Attached;
                 state.origin = Some(vec![1; 16]);
             }
             let mut engine = Engine::new(state);
@@ -300,7 +300,21 @@ mod tests {
         }
     }
     #[test]
-    fn legacy_guid_resume_accepts_old_host_only_with_unnamed_saved_credential() {
+    fn owner_resume_capability_is_mandatory_even_for_saved_guids() {
+        for mode in [SessionMode::CreatePending, SessionMode::AttachOnly, SessionMode::Attached] {
+            let mut state = state();
+            state.mode = mode;
+            state.origin = Some(vec![1;16]);
+            let mut engine = Engine::new(state);
+            let mut server = FakeLink::new(engine.state.id);
+            server.supports_owner_resume = false;
+            assert!(engine.run(&mut server, &mut FakeTerminal::default(), &mut |_| panic!("no mutation")).is_err());
+            assert_eq!(server.sent.len(), 1);
+            assert_eq!(server.creates, 0);
+        }
+    }
+    #[test]
+    fn guid_resume_never_downgrades_to_old_host() {
         for (named, credential) in [(false, true), (true, true), (false, false)] {
             let mut state = state();
             state.origin = Some(vec![1; 16]);
@@ -309,19 +323,14 @@ mod tests {
                 state.reference = Some("mywork".into());
             }
             if credential {
-                state.token = Some(vec![2; 32]);
+                state.mode = SessionMode::Attached;
             }
             let mut engine = Engine::resume_guid(state);
             let mut server = FakeLink::new(engine.state.id);
             server.supports_ended_rejection = false;
             let result = engine.run(&mut server, &mut FakeTerminal::default(), &mut |_| Ok(()));
-            if !named && credential {
-                assert_eq!(result.unwrap(), End::Disconnected);
-                assert!(server.sent.iter().any(|v| text(v, "type").unwrap() == "AttachSession"));
-            } else {
-                assert!(result.is_err());
-                assert_eq!(server.sent.len(), 1);
-            }
+            assert!(result.is_err());
+            assert_eq!(server.sent.len(), 1);
             assert_eq!(server.creates, 0);
         }
     }
@@ -330,7 +339,7 @@ mod tests {
     fn capability_presence_preserves_live_attachment_exit_codes() {
         for code in [0, 7] {
             let mut state = state();
-            state.token = Some(vec![2; 32]);
+            state.mode = SessionMode::Attached;
             state.origin = Some(vec![1; 16]);
             let mut engine = Engine::new(state);
             let mut server = FakeLink::new(engine.state.id);
@@ -357,7 +366,7 @@ mod tests {
             engine.run(&mut server, &mut terminal, &mut save).unwrap(),
             End::Disconnected
         );
-        assert!(engine.state.token.is_none());
+        assert_eq!(engine.state.mode, SessionMode::CreatePending);
         assert_eq!(engine.state.command_execution, Some(true));
         server.recovered = true;
         assert_eq!(
@@ -386,7 +395,7 @@ mod tests {
         let mut server = FakeLink::new(engine.state.id);
         let mut terminal = FakeTerminal::default();
         engine.run(&mut server, &mut terminal, &mut |_| Ok(())).unwrap();
-        assert!(engine.state.token.is_some());
+        assert_eq!(engine.state.mode, SessionMode::Attached);
         let saved = engine.state.clone();
         let mut engine = Engine::new(saved.clone());
         server.broker = vec![9; 16];
@@ -405,7 +414,7 @@ mod tests {
         assert_eq!(persisted.exit_confirmed, Some(false));
         assert_eq!(persisted.retirement_reason, Some(crate::store::RetirementReason::BrokerChanged));
         assert_eq!(persisted.id, saved.id);
-        assert!(persisted.token.is_none() && persisted.claim.is_empty() && persisted.pending.is_none());
+        assert!(persisted.pending.is_none());
         assert_eq!(persisted.origin, saved.origin);
     }
 
@@ -413,7 +422,7 @@ mod tests {
     fn unbound_saved_credentials_or_input_never_adopt_a_broker_or_send_protocol_frames() {
         for scenario in 0..3 {
             let mut saved = state();
-            if scenario == 0 { saved.token = Some(vec![2;32]); }
+            if scenario == 0 { saved.mode = SessionMode::Attached; }
             if scenario == 1 { saved.pending = Some(crate::store::PendingInput { seq: 1, bytes: b"private-input".to_vec() }); }
             if scenario == 2 { saved.origin = Some(vec![1]); }
             let origin = saved.origin.clone();
@@ -606,7 +615,6 @@ impl Engine {
             pending_sent: false,
             resize_generation: 0,
             last_size: (0, 0),
-            allow_legacy_resume: false,
             command_capable: false,
             active_command: None,
             command_input_ready: false,
@@ -614,13 +622,8 @@ impl Engine {
             transfer_capable: false,
         }
     }
-    /// Explicit GUID resume may attach to an older host with an existing credential.
-    /// Named records and tokenless creation recovery still require the new contract.
     pub fn resume_guid(state: State) -> Self {
-        let allow_legacy_resume = state.reference.is_none() && state.token.is_some();
-        let mut engine = Self::new(state);
-        engine.allow_legacy_resume = allow_legacy_resume;
-        engine
+        Self::new(state)
     }
     pub fn transfer_admission(&self) -> crate::transfer_admission::Admission {
         self.transfer_admission.clone()
@@ -674,10 +677,6 @@ impl Engine {
         save(&self.state)?;
         let mut fields = self.base();
         fields.extend([
-            (
-                "resume_token",
-                Value::Binary(self.state.token.clone().context("missing token")?),
-            ),
             ("mode", s("writer")),
             ("takeover", false.into()),
             ("after_output_seq", self.output_seq.into()),
@@ -701,7 +700,7 @@ impl Engine {
                     Value::Binary(self.state.request_id.as_bytes().to_vec()),
                 ),
                 ("requested_session_id", s(&self.state.id.to_string())),
-                ("create_claim", Value::Binary(self.state.claim.clone())),
+                ("session_alias", self.state.reference.as_deref().map(s).unwrap_or(Value::Nil)),
                 (
                     "origin_broker_instance_id",
                     Value::Binary(self.state.origin.clone().unwrap()),
@@ -764,7 +763,7 @@ impl Engine {
         let _transfer_scope = self.transfer_admission.connection_scope();
         ensure!(!self.state.ended, "session has ended; choose a NEW reference");
         ensure!(self.state.broker_binding_is_safe(),
-            "saved state has no safe broker binding; refusing credential/input reuse");
+            "saved state has no safe broker binding; refusing attachment/input reuse");
         terminal.reading(false);
         self.attachment = None;
         self.lease = None;
@@ -847,20 +846,15 @@ impl Engine {
                         self.transfer_capable = [crate::transfer_admission::CAPABILITY, crate::transfer_payload::METADATA_CAPABILITY]
                             .iter().all(|cap| caps.iter().any(|v| v.as_str() == Some(cap)));
                         terminal.command_capability(self.command_capable);
+                        ensure!(caps.iter().any(|v| v.as_str() == Some("owner-authorized-resume-v1")),
+                            "host lacks owner-authorized-resume-v1; upgrade host; no create or attach was sent");
                         ensure!(
                             CAPS.iter()
                                 .all(|c| caps.iter().any(|v| v.as_str() == Some(c))),
                             "host lacks required devbox-session-v1 capabilities"
                         );
-                        if !caps.iter().any(|value| value.as_str() == Some(ENDED_SESSION_CAPABILITY)) {
-                            ensure!(
-                                self.allow_legacy_resume,
-                                "host lacks ended-session-rejection; named connections require arTerm host 0.3 or later. No create or attach was sent. Only an existing unnamed GUID credential can connect to a legacy host"
-                            );
-                            diagnostics::line(format_args!(
-                                "[session] Legacy GUID resume: host lacks ended-session rejection; a retained exited session may report its old exit code. Finish existing sessions before upgrading the host."
-                            ));
-                        }
+                        ensure!(caps.iter().any(|value| value.as_str() == Some(ENDED_SESSION_CAPABILITY)),
+                            "host lacks ended-session-rejection; no create or attach was sent");
                         ensure!(
                             num(body, "max_frame")? >= 8192,
                             "host frame limit too small"
@@ -873,7 +867,7 @@ impl Engine {
                         let choice_changed = self.state.command_execution.is_none();
                         if choice_changed {
                             self.state.command_execution = Some(self.command_capable
-                                && self.state.origin.is_none() && self.state.token.is_none()
+                                && self.state.origin.is_none() && self.state.mode == SessionMode::CreatePending
                                 && self.state.create_deadline_ms.is_none()
                                 && crate::shell_integration::Commands::supported(&self.state.shell, &self.state.args));
                         }
@@ -896,7 +890,7 @@ impl Engine {
                             self.state.create_deadline_ms = Some(now_ms() + 600_000);
                             save(&self.state)?;
                         }
-                        if self.state.token.is_some() {
+                        if self.state.mode != SessionMode::CreatePending {
                             reply = Some(self.attach(terminal.size(), save)?);
                             phase = "attaching";
                         } else {
@@ -920,9 +914,7 @@ impl Engine {
                     "SessionCreated" => {
                         ensure!(phase == "creating", "unexpected create response");
                         self.same_session(body)?;
-                        let token = binary(body, "resume_token")?;
-                        ensure!(token.len() == 32, "invalid resume token");
-                        self.state.token = Some(token);
+                        self.state.mode = SessionMode::Attached;
                         save(&self.state)?;
                         let requires_attach = get(body, "requires_attach")?
                             .as_bool()
@@ -964,6 +956,8 @@ impl Engine {
                         );
                         self.attachment = Some(bin16(body, "attachment_id")?);
                         self.lease = Some(bin16(body, "lease_id")?);
+                        self.state.mode = SessionMode::Attached;
+                        save(&self.state)?;
                         self.acknowledge_input(num(body, "input_committed_through")?, save)?;
                         self.resize_generation = num(body, "resize_generation")?;
                         self.last_size = (0, 0);

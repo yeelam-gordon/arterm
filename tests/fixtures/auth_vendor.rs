@@ -14,6 +14,10 @@ fn main() {
     let root = env::current_exe().unwrap().parent().unwrap().to_owned();
     let mode = fs::read_to_string(root.join("mode")).unwrap();
     let args: Vec<String> = env::args().skip(1).collect();
+    if mode == "arguments" {
+        println!("{args:?}");
+        return;
+    }
     let ready = root.join("ready");
     let log = |message: &str| {
         let mut file = fs::OpenOptions::new()
@@ -56,6 +60,8 @@ fn main() {
         } else {
             "login-console"
         });
+        fs::write(root.join("login-pid.pending"), process::id().to_string()).unwrap();
+        fs::rename(root.join("login-pid.pending"), root.join("login-pid")).unwrap();
         println!("SECRET_OAUTH_URL=https://fixture.invalid/TOKEN");
         eprintln!("SECRET_OAUTH_TOKEN");
         match mode.as_str() {
@@ -76,6 +82,10 @@ fn main() {
     }
     if args.first().map(String::as_str) == Some("list") {
         log("list");
+        if mode == "discovery_timeout_once" && !root.join("discovered").exists() {
+            fs::write(root.join("discovered"), b"1").unwrap();
+            thread::sleep(Duration::from_secs(90));
+        }
         if mode == "discovery_expiry" && !root.join("discovered").exists() {
             fs::write(root.join("discovered"), b"1").unwrap();
             let _ = fs::remove_file(ready);
@@ -87,7 +97,16 @@ fn main() {
     }
     if args.first().map(String::as_str) == Some("connect") {
         log("connect");
-        if mode == "forward_success" {
+        if mode == "forward_stall" {
+            thread::sleep(Duration::from_secs(90));
+            return;
+        }
+        if mode == "forward_success" || mode == "discovery_timeout_once" {
+            let delay = root.join("forward-delay-ms");
+            if delay.exists() {
+                let milliseconds = fs::read_to_string(delay).unwrap().parse().unwrap();
+                thread::sleep(Duration::from_millis(milliseconds));
+            }
             let address = fs::read_to_string(root.join("address")).unwrap();
             println!("Forwarding from {address} to host port 31545");
             std::io::stdout().flush().unwrap();
