@@ -331,6 +331,18 @@ fn actual_signed_product_ipc() {
     );
     assert!(String::from_utf8_lossy(&read.stdout).contains("GATE-UNCHANGED=True"));
 
+    let config = arterm::client_config::load(&fixture.home).unwrap();
+    let target = &config.targets["fixture"];
+    // Reach local certificate validation without attempting fresh host discovery.
+    drop(arterm::store::Store::resolve(
+        &arterm::client_config::state_dir(&fixture.home, target),
+        &target.target_id,
+        &arterm::store::SessionReference::parse("unsigned").unwrap(),
+        true,
+        None,
+        None,
+    ).unwrap());
+
     let unsigned_owner = copies.0.join("unsigned-owner.exe");
     let unsigned_controller = copies.0.join("unsigned-controller.exe");
     fs::copy(&unsigned_client, &unsigned_owner).unwrap();
